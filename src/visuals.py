@@ -15,16 +15,16 @@ INTERVAL_COLUMN_MAP = {
 
 INTERVAL_STYLE_MAP = {
     "50%": {
-        "fillcolor": "rgba(31, 119, 180, 0.42)",
+        "fillcolor": "rgba(0, 153, 255, 0.62)",
     },
     "80%": {
-        "fillcolor": "rgba(255, 127, 14, 0.34)",
+        "fillcolor": "rgba(255, 191, 0, 0.52)",
     },
     "90%": {
-        "fillcolor": "rgba(148, 103, 189, 0.28)",
+        "fillcolor": "rgba(204, 102, 255, 0.44)",
     },
     "95%": {
-        "fillcolor": "rgba(214, 39, 40, 0.22)",
+        "fillcolor": "rgba(255, 64, 64, 0.36)",
     },
 }
 
