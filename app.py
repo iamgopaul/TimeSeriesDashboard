@@ -266,6 +266,32 @@ def save_current_snapshot(snapshot_type: str, label: str) -> None:
     st.session_state["history_loaded_label"] = ""
 
 
+def describe_analysis_exception(exc: Exception) -> str:
+    message = str(exc)
+    if "Residual whitening failed Ljung-Box gate" in message:
+        return (
+            "Analysis failed in `Strict deterministic` mode because the residual whitening check did not pass. "
+            "The Ljung-Box test still found autocorrelation in the ARIMA residuals, which means the selected "
+            "model did not fully explain the remaining time-series structure for this entity. "
+            "Try `Practical fallback`, increase `Max AR order (p)` or `Max MA order (q)`, enable winsorization, "
+            "or choose a different firm/target."
+        )
+    return f"Analysis failed: {message}"
+
+
+def build_display_metric_tables(metric_frames: list[pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    combined = pd.concat(metric_frames, ignore_index=True)
+    common_columns = [
+        column
+        for column in ["model", "MASE", "sMAPE", "mean_error", "successful_windows", "failed_windows"]
+        if column in combined.columns
+    ]
+    common_metrics = combined[common_columns].copy()
+    detail_metrics = combined.drop(columns=common_columns, errors="ignore").copy()
+    detail_metrics = detail_metrics.replace({None: "N/A"}).fillna("N/A")
+    return common_metrics, detail_metrics
+
+
 with st.sidebar:
     st.header("Upload")
     uploaded_file = st.file_uploader("CSV dataset", type=["csv"])
@@ -640,7 +666,7 @@ if run_analysis:
     except Exception as exc:
         append_execution_log(f"Analysis failed: {exc}")
         update_step_status("Analysis", "error", str(exc))
-        st.error(f"Analysis failed: {exc}")
+        st.error(describe_analysis_exception(exc))
         st.stop()
 
 if not has_matching_analysis:
@@ -844,6 +870,42 @@ if view == "Forecasts":
         ),
         use_container_width=True,
     )
+    if chronos_forecast is not None and chronos_forecast.available:
+        arima_mase = float(arima_forecast.metrics["MASE"].iloc[0])
+        chronos_mase = float(chronos_forecast.metrics["MASE"].iloc[0])
+        arima_smape = float(arima_forecast.metrics["sMAPE"].iloc[0])
+        chronos_smape = float(chronos_forecast.metrics["sMAPE"].iloc[0])
+        if arima_mase < chronos_mase:
+            better_model = "ARIMA"
+            margin = chronos_mase - arima_mase
+            summary = (
+                f"`ARIMA` performed better on this holdout. It achieved a lower `MASE` by `{margin:.3f}` "
+                f"(`{arima_mase:.3f}` vs `{chronos_mase:.3f}`)."
+            )
+        elif chronos_mase < arima_mase:
+            better_model = "Chronos"
+            margin = arima_mase - chronos_mase
+            summary = (
+                f"`Chronos` performed better on this holdout. It achieved a lower `MASE` by `{margin:.3f}` "
+                f"(`{chronos_mase:.3f}` vs `{arima_mase:.3f}`)."
+            )
+        else:
+            better_model = "Tie"
+            margin = 0.0
+            summary = f"`ARIMA` and `Chronos` tied on `MASE` at `{arima_mase:.3f}`."
+
+        compare_left, compare_middle, compare_right = st.columns(3)
+        compare_left.metric("Better model", better_model)
+        compare_middle.metric("ARIMA MASE", f"{arima_mase:.3f}")
+        compare_right.metric("Chronos MASE", f"{chronos_mase:.3f}")
+        if better_model == "Tie":
+            st.info(summary)
+        else:
+            st.success(summary)
+        st.caption(
+            f"sMAPE comparison: `ARIMA {arima_smape:.3f}` vs `Chronos {chronos_smape:.3f}`. "
+            f"Lower is better for both metrics."
+        )
     st.plotly_chart(
         build_forecast_figure(result_entity_series, naive_forecast.predictions, f"Naive Carry-Forward: {active_entity_label}"),
         use_container_width=True,
@@ -936,7 +998,11 @@ if view == "Forecasts":
         ),
         use_container_width=True,
     )
-    st.dataframe(pd.concat(metric_frames, ignore_index=True), width="stretch")
+    common_metrics, detail_metrics = build_display_metric_tables(metric_frames)
+    st.subheader("Forecast Metrics")
+    st.dataframe(common_metrics, width="stretch")
+    with st.expander("Model-specific metric details", expanded=False):
+        st.dataframe(detail_metrics, width="stretch")
 
 elif view == "Residuals":
     residual_left, residual_right = st.columns(2)
