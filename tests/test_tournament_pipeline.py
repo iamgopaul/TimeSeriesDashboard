@@ -53,3 +53,11 @@ def test_compute_forecasting_tournament_returns_firm_metrics(monkeypatch):
     assert result.successful_entities == 1
     assert not result.firm_metrics.empty
     assert bool(result.firm_metrics["chronos_beats_arima"].iloc[0])
+    assert not result.forecast_panel.empty
+    assert set(result.forecast_panel["model"]) == {"Naive", "ARIMA", "Chronos"}
+    assert {"entity_id", "entity_label", "absolute_error", "holdout_step", "q025", "q975"}.issubset(
+        result.forecast_panel.columns
+    )
+    assert not result.firm_forecast_summary.empty
+    assert result.firm_forecast_summary.loc[0, "winner"] == "Chronos"
+    assert result.firm_forecast_summary.loc[0, "holdout_points"] == 2

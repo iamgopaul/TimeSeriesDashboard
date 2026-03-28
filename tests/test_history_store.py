@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.history_store import delete_history_snapshot, list_history_entries, load_history_snapshot, save_history_snapshot
+from src.tournament_pipeline import ForecastTournamentResult
 from src.validation import RepeatRunCheckResult
 
 
@@ -39,6 +40,40 @@ def test_history_snapshot_roundtrip(tmp_path) -> None:
                 message="Repeat run matched exactly.",
             )
         },
+        "tournament_result": ForecastTournamentResult(
+            firm_metrics=pd.DataFrame(
+                [{"entity_id": "1", "entity_label": "A (1)", "winner": "ARIMA", "arima_mase": 0.8}]
+            ),
+            forecast_panel=pd.DataFrame(
+                {
+                    "entity_id": ["1", "1"],
+                    "entity_label": ["A (1)", "A (1)"],
+                    "date": pd.to_datetime(["2024-03-31", "2024-06-30"]),
+                    "model": ["ARIMA", "ARIMA"],
+                    "actual": [0.1, 0.2],
+                    "forecast": [0.11, 0.19],
+                    "error": [0.01, -0.01],
+                    "absolute_error": [0.01, 0.01],
+                    "holdout_step": [1, 2],
+                    "q025": [None, None],
+                    "q10": [None, None],
+                    "q25": [None, None],
+                    "q50": [None, None],
+                    "q75": [None, None],
+                    "q90": [None, None],
+                    "q975": [None, None],
+                }
+            ),
+            firm_forecast_summary=pd.DataFrame(
+                [{"entity_id": "1", "entity_label": "A (1)", "holdout_points": 2, "winner": "ARIMA"}]
+            ),
+            requested_entities=1,
+            processed_entities=1,
+            successful_entities=1,
+            skipped_entities=0,
+            failed_entities=0,
+            failure_examples=pd.DataFrame(columns=["entity_id", "entity_label", "error"]),
+        ),
         "step_statuses": [{"step": "Compute NLI", "status": "completed"}],
         "tuple_value": (1, 2, 3),
     }
@@ -66,6 +101,8 @@ def test_history_snapshot_roundtrip(tmp_path) -> None:
     assert "q025" in loaded["analysis_result"]["chronos_predictions"].columns
     assert "q975" in loaded["analysis_result"]["chronos_predictions"].columns
     assert loaded["validation_result"]["naive_repeat"].status == "exact_match"
+    assert list(loaded["tournament_result"].forecast_panel["model"]) == ["ARIMA", "ARIMA"]
+    assert loaded["tournament_result"].firm_forecast_summary.loc[0, "holdout_points"] == 2
     assert loaded["tuple_value"] == (1, 2, 3)
 
 

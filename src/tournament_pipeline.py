@@ -15,12 +15,48 @@ from src.nli_pipeline import compute_nli
 @dataclass
 class ForecastTournamentResult:
     firm_metrics: pd.DataFrame
+    forecast_panel: pd.DataFrame
+    firm_forecast_summary: pd.DataFrame
     requested_entities: int
     processed_entities: int
     successful_entities: int
     skipped_entities: int
     failed_entities: int
     failure_examples: pd.DataFrame
+
+
+FORECAST_PANEL_COLUMNS = [
+    "entity_id",
+    "entity_label",
+    "date",
+    "model",
+    "actual",
+    "forecast",
+    "error",
+    "absolute_error",
+    "holdout_step",
+    "q025",
+    "q10",
+    "q25",
+    "q50",
+    "q75",
+    "q90",
+    "q975",
+]
+
+
+def _build_forecast_panel_row(entity_id: str, entity_label: str, forecast_frame: pd.DataFrame) -> pd.DataFrame:
+    if forecast_frame.empty:
+        return pd.DataFrame(columns=FORECAST_PANEL_COLUMNS)
+    working = forecast_frame.copy().sort_values("date").reset_index(drop=True)
+    working["entity_id"] = entity_id
+    working["entity_label"] = entity_label
+    working["absolute_error"] = working["error"].abs() if "error" in working.columns else np.nan
+    working["holdout_step"] = np.arange(1, len(working) + 1, dtype=int)
+    for column in ("q025", "q10", "q25", "q50", "q75", "q90", "q975"):
+        if column not in working.columns:
+            working[column] = np.nan
+    return working[FORECAST_PANEL_COLUMNS].copy()
 
 
 def compute_forecasting_tournament(
@@ -39,6 +75,8 @@ def compute_forecasting_tournament(
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> ForecastTournamentResult:
     rows: list[dict] = []
+    forecast_frames: list[pd.DataFrame] = []
+    summary_rows: list[dict] = []
     failures: list[dict] = []
     processed_entities = 0
     skipped_entities = 0
@@ -119,6 +157,21 @@ def compute_forecasting_tournament(
             candidates["Chronos"] = chronos_mase
         winner = min(candidates.items(), key=lambda item: item[1])[0] if candidates else "N/A"
 
+        entity_forecasts = [
+            _build_forecast_panel_row(str(entity_id), entity_label, naive_forecast.predictions),
+            _build_forecast_panel_row(str(entity_id), entity_label, arima_forecast.predictions),
+        ]
+        if chronos_available and chronos_forecast is not None:
+            entity_forecasts.append(_build_forecast_panel_row(str(entity_id), entity_label, chronos_forecast.predictions))
+        combined_entity_forecasts = pd.concat(entity_forecasts, ignore_index=True)
+        forecast_frames.append(combined_entity_forecasts)
+
+        def _model_mae(model_name: str) -> float:
+            model_rows = combined_entity_forecasts.loc[combined_entity_forecasts["model"] == model_name]
+            if model_rows.empty:
+                return float("nan")
+            return float(model_rows["absolute_error"].mean())
+
         rows.append(
             {
                 "entity_id": entity_id,
@@ -142,13 +195,40 @@ def compute_forecasting_tournament(
                 "chronos_interval_width": float(chronos_forecast.metrics["median_interval_width"].iloc[0]) if chronos_available else float("nan"),
             }
         )
+        summary_rows.append(
+            {
+                "entity_id": entity_id,
+                "entity_label": entity_label,
+                "holdout_points": int(combined_entity_forecasts["date"].nunique()),
+                "holdout_start": combined_entity_forecasts["date"].min(),
+                "holdout_end": combined_entity_forecasts["date"].max(),
+                "holdout_actual_mean": float(combined_entity_forecasts["actual"].mean()),
+                "holdout_actual_std": float(combined_entity_forecasts["actual"].std(ddof=0)),
+                "naive_mae": _model_mae("Naive"),
+                "arima_mae": _model_mae("ARIMA"),
+                "chronos_mae": _model_mae("Chronos"),
+                "winner": winner,
+                "chronos_available": chronos_available,
+                "nli_score": float(nli_result.nli_score),
+                "break_count": int(len(nli_result.break_result.break_indices)),
+                "volatility": volatility,
+            }
+        )
 
     firm_metrics = pd.DataFrame(rows)
     if not firm_metrics.empty:
         firm_metrics = firm_metrics.sort_values(["delta_mase", "entity_label"], ascending=[False, True]).reset_index(drop=True)
+    forecast_panel = pd.concat(forecast_frames, ignore_index=True) if forecast_frames else pd.DataFrame(columns=FORECAST_PANEL_COLUMNS)
+    if not forecast_panel.empty:
+        forecast_panel = forecast_panel.sort_values(["entity_label", "model", "date"]).reset_index(drop=True)
+    firm_forecast_summary = pd.DataFrame(summary_rows)
+    if not firm_forecast_summary.empty:
+        firm_forecast_summary = firm_forecast_summary.sort_values(["winner", "entity_label"]).reset_index(drop=True)
     failure_examples = pd.DataFrame(failures, columns=["entity_id", "entity_label", "error"]).head(20)
     return ForecastTournamentResult(
         firm_metrics=firm_metrics,
+        forecast_panel=forecast_panel,
+        firm_forecast_summary=firm_forecast_summary,
         requested_entities=total_entities,
         processed_entities=processed_entities,
         successful_entities=int(len(firm_metrics)),

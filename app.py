@@ -41,10 +41,14 @@ from src.visuals import (
     build_cumulative_error_figure,
     build_error_gap_figure,
     build_eligibility_figure,
+    build_firm_error_leaderboard_figure,
+    build_forecast_calibration_figure,
     build_forecast_figure,
     build_interval_forecast_figure,
+    build_multifirm_error_distribution_figure,
     build_nli_distribution_figure,
     build_nli_quartile_figure,
+    build_panel_aggregate_forecast_figure,
     build_residual_autocorrelation_figure,
     build_residual_figure,
     build_tournament_gap_scatter,
@@ -292,6 +296,28 @@ def build_display_metric_tables(metric_frames: list[pd.DataFrame]) -> tuple[pd.D
     detail_metrics = combined.drop(columns=common_columns, errors="ignore").copy()
     detail_metrics = detail_metrics.replace({None: "N/A"}).fillna("N/A")
     return common_metrics, detail_metrics
+
+
+def build_holdout_actual_series(forecast_panel: pd.DataFrame, entity_id: str) -> pd.DataFrame:
+    if forecast_panel.empty:
+        return pd.DataFrame(columns=["date", "value"])
+    working = (
+        forecast_panel.loc[forecast_panel["entity_id"].astype(str) == str(entity_id), ["date", "actual"]]
+        .drop_duplicates()
+        .sort_values("date")
+        .rename(columns={"actual": "value"})
+        .reset_index(drop=True)
+    )
+    return working
+
+
+def extract_model_forecast_frame(forecast_panel: pd.DataFrame, entity_id: str, model_name: str) -> pd.DataFrame:
+    if forecast_panel.empty:
+        return pd.DataFrame()
+    working = forecast_panel.loc[
+        (forecast_panel["entity_id"].astype(str) == str(entity_id)) & (forecast_panel["model"] == model_name)
+    ].copy()
+    return working.sort_values("date").reset_index(drop=True)
 
 
 def responsive_columns(spec, compact_count: int = 1):
@@ -1147,6 +1173,8 @@ elif view == "Tournament Summary":
                 f"across up to {stored_tournament_meta['tournament_limit']} firms."
             )
         metrics = tournament_result.firm_metrics
+        forecast_panel = tournament_result.forecast_panel
+        forecast_summary = tournament_result.firm_forecast_summary
         card_left, card_middle, card_right = responsive_columns(3, compact_count=1)
         card_left.metric("Processed firms", str(tournament_result.processed_entities))
         card_middle.metric("Successful tournaments", str(tournament_result.successful_entities))
@@ -1176,6 +1204,173 @@ elif view == "Tournament Summary":
             chart_right.plotly_chart(build_coverage_quartile_figure(metrics), use_container_width=True)
             st.plotly_chart(build_winner_distribution_figure(metrics), use_container_width=True)
             st.dataframe(metrics.head(100), width="stretch")
+        if not forecast_panel.empty:
+            st.subheader("Full-Dataset Forecast Views")
+            st.caption(
+                "These charts come from the same multi-firm tournament run. Aggregate views summarize holdout behavior "
+                "across all successful firms, while the drilldown reuses the saved forecasts for one firm."
+            )
+            panel_left, panel_middle, panel_right = responsive_columns(3, compact_count=1)
+            panel_left.metric("Forecast rows", f"{len(forecast_panel):,}")
+            panel_middle.metric("Firms with saved forecasts", str(int(forecast_panel['entity_id'].nunique())))
+            panel_right.metric("Models in panel", str(int(forecast_panel['model'].nunique())))
+
+            st.caption(
+                "Panel actual vs predicted aggregates the holdout window by date, so it shows the average trajectory "
+                "across firms rather than any one company."
+            )
+            st.plotly_chart(build_panel_aggregate_forecast_figure(forecast_panel), use_container_width=True)
+
+            chart_left, chart_right = responsive_columns(2, compact_count=1)
+            chart_left.caption(
+                "Absolute error distribution highlights spread and tail risk across all firm-date holdout points."
+            )
+            chart_left.plotly_chart(
+                build_multifirm_error_distribution_figure(forecast_panel),
+                use_container_width=True,
+            )
+            chart_right.caption(
+                "Actual vs predicted scatter helps reveal systematic over- or under-prediction across the panel."
+            )
+            chart_right.plotly_chart(
+                build_forecast_calibration_figure(forecast_panel),
+                use_container_width=True,
+            )
+
+            leaderboard_options = {
+                "Naive": "naive_mae",
+                "ARIMA": "arima_mae",
+            }
+            if not forecast_summary.empty and forecast_summary["chronos_mae"].notna().any():
+                leaderboard_options["Chronos"] = "chronos_mae"
+            leaderboard_model = st.selectbox(
+                "Leaderboard model",
+                list(leaderboard_options.keys()),
+                key="tournament_leaderboard_model",
+            )
+            leaderboard_column = leaderboard_options[leaderboard_model]
+            chart_left, chart_right = responsive_columns(2, compact_count=1)
+            chart_left.caption(
+                f"Best firms by `{leaderboard_model}` mean absolute error show where this model was most accurate."
+            )
+            chart_left.plotly_chart(
+                build_firm_error_leaderboard_figure(
+                    forecast_summary,
+                    leaderboard_column,
+                    title=f"Best Firms By {leaderboard_model} Error",
+                    ascending=True,
+                ),
+                use_container_width=True,
+            )
+            chart_right.caption(
+                f"Worst firms by `{leaderboard_model}` mean absolute error show where this model struggled most."
+            )
+            chart_right.plotly_chart(
+                build_firm_error_leaderboard_figure(
+                    forecast_summary,
+                    leaderboard_column,
+                    title=f"Worst Firms By {leaderboard_model} Error",
+                    ascending=False,
+                ),
+                use_container_width=True,
+            )
+
+            if not forecast_summary.empty:
+                drilldown_labels = forecast_summary["entity_label"].tolist()
+                default_index = drilldown_labels.index(active_entity_label) if active_entity_label in drilldown_labels else 0
+                selected_drilldown_label = st.selectbox(
+                    "Firm drilldown",
+                    drilldown_labels,
+                    index=default_index,
+                    key="tournament_drilldown_entity",
+                )
+                selected_summary = forecast_summary.loc[
+                    forecast_summary["entity_label"] == selected_drilldown_label
+                ].iloc[0]
+                selected_entity_id = str(selected_summary["entity_id"])
+                selected_metrics = metrics.loc[metrics["entity_id"].astype(str) == selected_entity_id]
+                selected_winner = selected_summary["winner"]
+                selected_holdout_points = int(selected_summary["holdout_points"])
+                summary_message = (
+                    f"`{selected_drilldown_label}` used `{selected_holdout_points}` holdout point(s). "
+                    f"The best model on this run was `{selected_winner}`."
+                )
+                if selected_winner == "Chronos":
+                    st.success(summary_message)
+                elif selected_winner == "ARIMA":
+                    st.info(summary_message)
+                else:
+                    st.warning(summary_message)
+                st.caption(
+                    "The drilldown below reuses the tournament forecasts for one firm so you can inspect actual vs predicted "
+                    "without launching a separate single-entity run."
+                )
+                selected_actual_series = build_holdout_actual_series(forecast_panel, selected_entity_id)
+                selected_naive = extract_model_forecast_frame(forecast_panel, selected_entity_id, "Naive")
+                selected_arima = extract_model_forecast_frame(forecast_panel, selected_entity_id, "ARIMA")
+                selected_chronos = extract_model_forecast_frame(forecast_panel, selected_entity_id, "Chronos")
+                st.plotly_chart(
+                    build_combined_forecast_figure(
+                        selected_actual_series,
+                        [selected_naive, selected_arima, selected_chronos],
+                        f"Tournament Drilldown: {selected_drilldown_label}",
+                    ),
+                    use_container_width=True,
+                )
+                chart_left, chart_right = responsive_columns(2, compact_count=1)
+                chart_left.plotly_chart(
+                    build_forecast_figure(
+                        selected_actual_series,
+                        selected_arima,
+                        f"ARIMA Holdout Fit: {selected_drilldown_label}",
+                    ),
+                    use_container_width=True,
+                )
+                if not selected_chronos.empty:
+                    chart_right.plotly_chart(
+                        build_forecast_figure(
+                            selected_actual_series,
+                            selected_chronos,
+                            f"Chronos Holdout Fit: {selected_drilldown_label}",
+                        ),
+                        use_container_width=True,
+                    )
+                else:
+                    chart_right.info("Chronos was not available for this firm in the saved tournament result.")
+                st.plotly_chart(
+                    build_cumulative_error_figure(
+                        [selected_naive, selected_arima, selected_chronos],
+                        title=f"Cumulative Absolute Error: {selected_drilldown_label}",
+                    ),
+                    use_container_width=True,
+                )
+                if not selected_chronos.empty and {"q025", "q25", "q75", "q975"}.issubset(selected_chronos.columns):
+                    chronos_interval_left, chronos_interval_right = responsive_columns(2, compact_count=1)
+                    chronos_interval_left.plotly_chart(
+                        build_interval_forecast_figure(
+                            selected_actual_series,
+                            selected_chronos,
+                            f"Chronos 50% Interval: {selected_drilldown_label}",
+                            "50%",
+                        ),
+                        use_container_width=True,
+                    )
+                    chronos_interval_right.plotly_chart(
+                        build_interval_forecast_figure(
+                            selected_actual_series,
+                            selected_chronos,
+                            f"Chronos 80% Interval: {selected_drilldown_label}",
+                            "80%",
+                        ),
+                        use_container_width=True,
+                    )
+                if not selected_metrics.empty:
+                    with st.expander("Selected firm forecast summary", expanded=False):
+                        st.dataframe(selected_metrics, width="stretch")
+                with st.expander("Multi-firm forecast summary", expanded=False):
+                    st.dataframe(forecast_summary.head(100), width="stretch")
+                with st.expander("Saved forecast panel sample", expanded=False):
+                    st.dataframe(forecast_panel.head(200), width="stretch")
         if not tournament_result.failure_examples.empty:
             with st.expander("Tournament failures", expanded=False):
                 st.dataframe(tournament_result.failure_examples, width="stretch")
@@ -1325,3 +1520,28 @@ else:
             file_name="full_dataset_nli_distribution.csv",
             mime="text/csv",
         )
+        export_tournament_result = st.session_state.get("tournament_result")
+        export_tournament_meta = st.session_state.get("tournament_meta")
+        if export_tournament_result is not None and export_tournament_meta is not None:
+            st.caption(
+                f"Tournament exports use the latest saved run for `{export_tournament_meta['target_column']}` "
+                f"across up to {export_tournament_meta['tournament_limit']} firms."
+            )
+            st.download_button(
+                "Download tournament firm metrics",
+                export_tournament_result.firm_metrics.to_csv(index=False).encode("utf-8"),
+                file_name="tournament_firm_metrics.csv",
+                mime="text/csv",
+            )
+            st.download_button(
+                "Download tournament firm forecast summary",
+                export_tournament_result.firm_forecast_summary.to_csv(index=False).encode("utf-8"),
+                file_name="tournament_firm_forecast_summary.csv",
+                mime="text/csv",
+            )
+            st.download_button(
+                "Download tournament forecast panel",
+                export_tournament_result.forecast_panel.to_csv(index=False).encode("utf-8"),
+                file_name="tournament_forecast_panel.csv",
+                mime="text/csv",
+            )

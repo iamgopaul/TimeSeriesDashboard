@@ -163,6 +163,133 @@ def build_cumulative_error_figure(forecast_frames: list[pd.DataFrame], title: st
     return figure
 
 
+def build_panel_aggregate_forecast_figure(forecast_panel: pd.DataFrame, title: str = "Panel Actual Vs Predicted") -> go.Figure:
+    figure = go.Figure()
+    if forecast_panel.empty:
+        return figure
+    working = forecast_panel.dropna(subset=["date", "actual", "forecast"]).copy()
+    if working.empty:
+        return figure
+    actual_series = (
+        working.groupby("date", as_index=False)["actual"]
+        .mean()
+        .sort_values("date")
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=actual_series["date"],
+            y=actual_series["actual"],
+            mode="lines+markers",
+            name="Panel actual mean",
+            line={"width": 3},
+        )
+    )
+    forecast_summary = (
+        working.groupby(["date", "model"], as_index=False)["forecast"]
+        .mean()
+        .sort_values(["model", "date"])
+    )
+    for model_name, subset in forecast_summary.groupby("model", sort=False):
+        figure.add_trace(
+            go.Scatter(
+                x=subset["date"],
+                y=subset["forecast"],
+                mode="lines+markers",
+                name=f"{model_name} mean forecast",
+            )
+        )
+    figure.update_layout(title=title, xaxis_title="Holdout date", yaxis_title="Mean value across firms")
+    return figure
+
+
+def build_multifirm_error_distribution_figure(
+    forecast_panel: pd.DataFrame,
+    title: str = "Holdout Absolute Error Distribution",
+) -> go.Figure:
+    figure = go.Figure()
+    if forecast_panel.empty:
+        return figure
+    working = forecast_panel.dropna(subset=["model", "absolute_error"]).copy()
+    if working.empty:
+        return figure
+    for model_name, subset in working.groupby("model", sort=False):
+        figure.add_trace(
+            go.Box(
+                y=subset["absolute_error"],
+                name=str(model_name),
+                boxmean=True,
+            )
+        )
+    figure.update_layout(title=title, yaxis_title="Absolute error", xaxis_title="Model")
+    return figure
+
+
+def build_forecast_calibration_figure(
+    forecast_panel: pd.DataFrame,
+    title: str = "Actual Vs Predicted Across Holdout Points",
+) -> go.Figure:
+    figure = go.Figure()
+    if forecast_panel.empty:
+        return figure
+    working = forecast_panel.dropna(subset=["model", "actual", "forecast"]).copy()
+    if working.empty:
+        return figure
+    diagonal_min = float(min(working["actual"].min(), working["forecast"].min()))
+    diagonal_max = float(max(working["actual"].max(), working["forecast"].max()))
+    figure.add_trace(
+        go.Scatter(
+            x=[diagonal_min, diagonal_max],
+            y=[diagonal_min, diagonal_max],
+            mode="lines",
+            name="Perfect fit",
+            line={"dash": "dash"},
+        )
+    )
+    for model_name, subset in working.groupby("model", sort=False):
+        figure.add_trace(
+            go.Scatter(
+                x=subset["actual"],
+                y=subset["forecast"],
+                mode="markers",
+                name=str(model_name),
+                text=subset["entity_label"] if "entity_label" in subset.columns else None,
+                hovertemplate=(
+                    "Firm: %{text}<br>Actual: %{x:.3f}<br>Forecast: %{y:.3f}<extra></extra>"
+                    if "entity_label" in subset.columns
+                    else "Actual: %{x:.3f}<br>Forecast: %{y:.3f}<extra></extra>"
+                ),
+                marker={"size": 8, "opacity": 0.7},
+            )
+        )
+    figure.update_layout(title=title, xaxis_title="Actual", yaxis_title="Forecast")
+    return figure
+
+
+def build_firm_error_leaderboard_figure(
+    summary: pd.DataFrame,
+    model_column: str,
+    title: str,
+    top_n: int = 10,
+    ascending: bool = True,
+) -> go.Figure:
+    figure = go.Figure()
+    if summary.empty or model_column not in summary.columns:
+        return figure
+    working = summary.dropna(subset=[model_column]).sort_values(model_column, ascending=ascending).head(top_n)
+    if working.empty:
+        return figure
+    figure.add_trace(
+        go.Bar(
+            x=working[model_column],
+            y=working["entity_label"],
+            orientation="h",
+            name=model_column,
+        )
+    )
+    figure.update_layout(title=title, xaxis_title="Mean absolute error", yaxis_title="Firm")
+    return figure
+
+
 def build_residual_figure(residuals: pd.Series) -> go.Figure:
     figure = go.Figure()
     figure.add_trace(
