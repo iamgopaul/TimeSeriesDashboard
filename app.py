@@ -294,7 +294,10 @@ def build_display_metric_tables(metric_frames: list[pd.DataFrame]) -> tuple[pd.D
     ]
     common_metrics = combined[common_columns].copy()
     detail_metrics = combined.drop(columns=common_columns, errors="ignore").copy()
-    detail_metrics = detail_metrics.replace({None: "N/A"}).fillna("N/A")
+    detail_metrics = detail_metrics.convert_dtypes()
+    for column in detail_metrics.columns:
+        if pd.api.types.is_object_dtype(detail_metrics[column]) or pd.api.types.is_string_dtype(detail_metrics[column]):
+            detail_metrics[column] = detail_metrics[column].fillna("N/A")
     return common_metrics, detail_metrics
 
 
