@@ -94,6 +94,47 @@ def _add_interval_band(figure: go.Figure, forecast_frame: pd.DataFrame, interval
     )
 
 
+def _interval_bar_width_ms(forecast_frame: pd.DataFrame) -> float:
+    if forecast_frame.empty or "date" not in forecast_frame.columns:
+        return float(45 * 24 * 60 * 60 * 1000)
+    dates = pd.to_datetime(forecast_frame["date"]).sort_values().drop_duplicates()
+    if len(dates) < 2:
+        return float(45 * 24 * 60 * 60 * 1000)
+    diffs = dates.diff().dropna().dt.total_seconds() * 1000
+    if diffs.empty:
+        return float(45 * 24 * 60 * 60 * 1000)
+    return float(max(diffs.median() * 0.55, 7 * 24 * 60 * 60 * 1000))
+
+
+def _add_interval_highlight_bars(figure: go.Figure, forecast_frame: pd.DataFrame, interval_label: str) -> None:
+    lower_column, upper_column = INTERVAL_COLUMN_MAP[interval_label]
+    if forecast_frame.empty or not {lower_column, upper_column}.issubset(forecast_frame.columns):
+        return
+    working = forecast_frame.sort_values("date").copy()
+    style = INTERVAL_STYLE_MAP[interval_label]
+    figure.add_trace(
+        go.Bar(
+            x=working["date"],
+            y=working[upper_column] - working[lower_column],
+            base=working[lower_column],
+            customdata=working[[lower_column, upper_column]],
+            width=_interval_bar_width_ms(working),
+            name=f"{interval_label} interval",
+            marker={
+                "color": style["fillcolor"],
+                "line": {"width": 0},
+            },
+            opacity=1.0,
+            hovertemplate=(
+                "Date: %{x}<br>"
+                + f"{interval_label} lower: %{{customdata[0]:.3f}}<br>"
+                + f"{interval_label} upper: %{{customdata[1]:.3f}}"
+                + "<extra></extra>"
+            ),
+        )
+    )
+
+
 def build_forecast_figure(
     actual_series: pd.DataFrame,
     forecast_frame: pd.DataFrame,
@@ -133,11 +174,9 @@ def build_interval_forecast_figure(
     title: str,
     interval_label: str,
 ) -> go.Figure:
-    lower_column, upper_column = INTERVAL_COLUMN_MAP[interval_label]
     figure = go.Figure()
     if not forecast_frame.empty:
-        model_name = str(forecast_frame["model"].iloc[0])
-        _add_interval_band(figure, forecast_frame, interval_label)
+        _add_interval_highlight_bars(figure, forecast_frame, interval_label)
     figure.add_trace(
         go.Scatter(
             x=actual_series["date"],
