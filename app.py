@@ -297,9 +297,15 @@ def build_display_metric_tables(metric_frames: list[pd.DataFrame]) -> tuple[pd.D
 def responsive_columns(spec, compact_count: int = 1):
     if not st.session_state.get("compact_layout", False):
         return st.columns(spec)
-    if isinstance(spec, int):
-        return st.columns(min(spec, compact_count))
-    return st.columns(min(len(spec), compact_count))
+    weights = [1] * spec if isinstance(spec, int) else list(spec)
+    if compact_count <= 1:
+        return tuple(st.container() for _ in weights)
+
+    containers = []
+    for start in range(0, len(weights), compact_count):
+        row_weights = weights[start : start + compact_count]
+        containers.extend(st.columns(row_weights))
+    return tuple(containers)
 
 
 with st.sidebar:
