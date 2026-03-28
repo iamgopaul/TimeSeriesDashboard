@@ -72,6 +72,8 @@ except Exception:
 
 _EXECUTION_STEP_PLACEHOLDER = None
 _EXECUTION_LOG_PLACEHOLDER = None
+FULL_DATASET_FORECAST_VIEW = "Full Cleaned Forecast Analysis"
+LEGACY_TOURNAMENT_VIEW = "Tournament Summary"
 
 
 st.set_page_config(page_title="WRDS Forecast Dashboard", layout="wide")
@@ -140,6 +142,12 @@ def render_profile(profile) -> None:
 
 def _timestamp() -> str:
     return datetime.now().strftime("%H:%M:%S")
+
+
+def normalize_dashboard_view(view_name: str | None) -> str:
+    if view_name == LEGACY_TOURNAMENT_VIEW:
+        return FULL_DATASET_FORECAST_VIEW
+    return str(view_name or "Forecasts")
 
 
 def reset_execution_console() -> None:
@@ -224,8 +232,9 @@ def build_model_gap(arima_predictions: pd.DataFrame, chronos_predictions: pd.Dat
     return merged
 
 
-def infer_document_holdout_size(series_frame: pd.DataFrame) -> int | None:
-    working = series_frame.sort_values("date").reset_index(drop=True)
+def infer_document_holdout_size_from_dates(date_series: pd.Series) -> int | None:
+    working = pd.DataFrame({"date": pd.to_datetime(date_series, errors="coerce")}).dropna().sort_values("date").drop_duplicates()
+    working = working.reset_index(drop=True)
     if working.empty:
         return None
     mask = (working["date"] >= pd.Timestamp("2023-01-01")) & (working["date"] <= pd.Timestamp("2024-12-31"))
@@ -237,6 +246,10 @@ def infer_document_holdout_size(series_frame: pd.DataFrame) -> int | None:
     if first_idx != len(working) - int(mask.sum()):
         return None
     return int(mask.sum())
+
+
+def infer_document_holdout_size(series_frame: pd.DataFrame) -> int | None:
+    return infer_document_holdout_size_from_dates(series_frame["date"])
 
 
 def render_quality_badges(labels: list[str]) -> None:
@@ -390,7 +403,7 @@ with st.sidebar:
                 st.session_state["validation_meta"] = snapshot.get("validation_meta")
                 st.session_state["tournament_result"] = snapshot.get("tournament_result")
                 st.session_state["tournament_meta"] = snapshot.get("tournament_meta")
-                st.session_state["dashboard_view"] = snapshot.get("dashboard_view", "Forecasts")
+                st.session_state["dashboard_view"] = normalize_dashboard_view(snapshot.get("dashboard_view", "Forecasts"))
                 st.session_state["execution_log"] = snapshot.get("execution_log", [])
                 st.session_state["step_statuses"] = snapshot.get("step_statuses", [])
                 st.session_state["history_loaded"] = True
@@ -447,12 +460,19 @@ if dataset_uploaded:
             index=metric_columns.index("ROA") if "ROA" in metric_columns else 0,
         )
         entity_options = build_entity_options(prepared)
-        entity_label = st.selectbox("Firm / entity", entity_options)
+        if analysis_scope == "Single entity diagnostics":
+            entity_label = st.selectbox("Firm / entity", entity_options)
+        else:
+            entity_label = "Panel-wide"
 
-    entity_id = resolve_entity_id(prepared, entity_label)
-    document_holdout_size = infer_document_holdout_size(
-        build_target_series(prepared, entity_id, target_column)
-    )
+    if analysis_scope == "Single entity diagnostics":
+        entity_id = resolve_entity_id(prepared, entity_label)
+        document_holdout_size = infer_document_holdout_size(
+            build_target_series(prepared, entity_id, target_column)
+        )
+    else:
+        entity_id = ""
+        document_holdout_size = infer_document_holdout_size_from_dates(prepared["date"])
 
     with overview_right:
         evaluation_mode_label = st.selectbox(
@@ -479,10 +499,18 @@ if dataset_uploaded:
         )
         if holdout_policy == "Document default (2023-2024 when available)" and document_holdout_size is not None:
             holdout_size = int(document_holdout_size)
-            st.caption(f"Using document-aligned holdout of `{holdout_size}` quarter(s) covering the final 2023-2024 window.")
+            if analysis_scope == "Single entity diagnostics":
+                st.caption(f"Using document-aligned holdout of `{holdout_size}` quarter(s) covering the final 2023-2024 window.")
+            else:
+                st.caption(
+                    f"Using document-aligned panel holdout of `{holdout_size}` quarter(s) covering the final 2023-2024 window."
+                )
         else:
             if holdout_policy == "Document default (2023-2024 when available)" and document_holdout_size is None:
-                st.caption("Document-aligned 2023-2024 holdout is unavailable for this firm, so manual holdout is being used.")
+                if analysis_scope == "Single entity diagnostics":
+                    st.caption("Document-aligned 2023-2024 holdout is unavailable for this firm, so manual holdout is being used.")
+                else:
+                    st.caption("Document-aligned 2023-2024 holdout is unavailable for this panel, so manual holdout is being used.")
             holdout_size = st.slider("Holdout quarters", min_value=2, max_value=12, value=8)
         max_p = st.slider("Max AR order (p)", min_value=0, max_value=4, value=2)
         max_d = st.slider("Max differencing order (d)", min_value=0, max_value=2, value=2)
@@ -521,7 +549,11 @@ if dataset_uploaded:
     )
     target_provenance = describe_target_provenance(analysis_frame, target_column)
     eligibility_summary = build_entity_eligibility_summary(analysis_frame, target_column, min_history=minimum_history)
-    entity_series = build_target_series(analysis_frame, entity_id, target_column)
+    entity_series = (
+        build_target_series(analysis_frame, entity_id, target_column)
+        if analysis_scope == "Single entity diagnostics"
+        else pd.DataFrame(columns=["date", "value"])
+    )
 
     with st.expander("Audit Summary", expanded=False):
         audit_left, audit_middle, audit_right = responsive_columns(3, compact_count=1)
@@ -542,9 +574,10 @@ if dataset_uploaded:
         st.error("The selected series is too short for the requested holdout and ARIMA diagnostics.")
         st.stop()
 
-    continuity = compute_continuity_summary(entity_series)
-    with st.expander("Series Continuity", expanded=False):
-        st.dataframe(continuity, width="stretch")
+    if analysis_scope == "Single entity diagnostics":
+        continuity = compute_continuity_summary(entity_series)
+        with st.expander("Series Continuity", expanded=False):
+            st.dataframe(continuity, width="stretch")
 
     render_execution_console()
 
@@ -755,6 +788,10 @@ if run_analysis:
                 progress_callback=update_progress,
                 break_method=evaluation_mode,
                 strict_whitening=evaluation_mode == "strict",
+                max_p=max_p,
+                max_d=max_d,
+                max_q=max_q,
+                min_history=minimum_history,
             )
             progress_bar.progress(1.0, text="Full-dataset NLI run complete.")
             update_step_status(
@@ -986,10 +1023,11 @@ if analysis_scope == "Single entity diagnostics":
             st.warning("Some ARIMA forecast windows failed or needed fallback logic.")
             st.dataframe(pd.DataFrame({"warning": arima_forecast.warnings}), width="stretch")
 
+st.session_state["dashboard_view"] = normalize_dashboard_view(st.session_state.get("dashboard_view"))
 view_options = (
     ["Forecasts", "Residuals", "NLI Distribution", "Exports"]
     if analysis_scope == "Single entity diagnostics"
-    else ["Dataset Summary", "Tournament Summary", "NLI Distribution", "Exports"]
+    else ["Dataset Summary", FULL_DATASET_FORECAST_VIEW, "NLI Distribution", "Exports"]
 )
 view = st.radio("View", view_options, horizontal=False, key="dashboard_view")
 
@@ -1185,8 +1223,11 @@ elif view == "Dataset Summary":
         with st.expander("Sample full-dataset NLI failures", expanded=False):
             st.dataframe(full_distribution_result.failure_examples, width="stretch")
 
-elif view == "Tournament Summary":
-    st.caption("Run a cross-firm forecasting tournament to compare Naive, ARIMA, and Chronos across firms.")
+elif view == FULL_DATASET_FORECAST_VIEW:
+    st.caption(
+        "Run the full cleaned dataset forecast analysis to compare Naive, ARIMA, and Chronos across firms "
+        "with aggregate actual-vs-predicted views and per-firm drilldowns."
+    )
     if dataset_uploaded:
         tournament_limit = st.number_input(
             "Max entities for tournament",
@@ -1201,12 +1242,22 @@ elif view == "Tournament Summary":
             "target_column": target_column,
             "tournament_limit": int(tournament_limit),
             "holdout_size": int(holdout_size),
+            "holdout_policy": holdout_policy,
             "run_chronos": bool(tournament_run_chronos),
             "evaluation_mode": evaluation_mode,
+            "max_p": int(max_p),
+            "max_d": int(max_d),
+            "max_q": int(max_q),
+            "chronos_deterministic": bool(chronos_deterministic),
+            "chronos_seed": int(chronos_seed),
+            "chronos_samples": int(chronos_samples),
             "winsorization_enabled": bool(enable_winsorization),
+            "winsor_lower": float(winsor_lower),
+            "winsor_upper": float(winsor_upper),
+            "minimum_history": int(minimum_history),
         }
         tournament_left, tournament_right = responsive_columns([1, 1], compact_count=1)
-        compute_tournament = tournament_left.button("Compute Tournament Summary")
+        compute_tournament = tournament_left.button("Compute Full Cleaned Forecast Analysis")
         clear_tournament = tournament_right.button("Clear Tournament Result")
 
         if clear_tournament:
@@ -1242,6 +1293,7 @@ elif view == "Tournament Summary":
                 chronos_deterministic=chronos_deterministic,
                 chronos_seed=chronos_seed,
                 chronos_samples=chronos_samples,
+                minimum_history=minimum_history,
                 progress_callback=update_tournament_progress,
             )
             st.session_state["tournament_meta"] = tournament_meta
@@ -1270,6 +1322,41 @@ elif view == "Tournament Summary":
             st.caption(
                 f"Showing saved tournament for `{stored_tournament_meta['target_column']}` "
                 f"across up to {stored_tournament_meta['tournament_limit']} firms."
+            )
+        with st.expander("Tournament run settings", expanded=False):
+            st.write(
+                {
+                    "holdout_policy": stored_tournament_meta.get("holdout_policy", holdout_policy) if stored_tournament_meta else holdout_policy,
+                    "holdout_size": stored_tournament_meta.get("holdout_size", holdout_size) if stored_tournament_meta else holdout_size,
+                    "evaluation_mode": stored_tournament_meta.get("evaluation_mode", evaluation_mode) if stored_tournament_meta else evaluation_mode,
+                    "max_p": stored_tournament_meta.get("max_p", max_p) if stored_tournament_meta else max_p,
+                    "max_d": stored_tournament_meta.get("max_d", max_d) if stored_tournament_meta else max_d,
+                    "max_q": stored_tournament_meta.get("max_q", max_q) if stored_tournament_meta else max_q,
+                    "run_chronos": stored_tournament_meta.get("run_chronos", run_chronos) if stored_tournament_meta else run_chronos,
+                    "chronos_deterministic": (
+                        stored_tournament_meta.get("chronos_deterministic", chronos_deterministic)
+                        if stored_tournament_meta
+                        else chronos_deterministic
+                    ),
+                    "chronos_seed": stored_tournament_meta.get("chronos_seed", chronos_seed) if stored_tournament_meta else chronos_seed,
+                    "chronos_samples": (
+                        stored_tournament_meta.get("chronos_samples", chronos_samples)
+                        if stored_tournament_meta
+                        else chronos_samples
+                    ),
+                    "winsorization_enabled": (
+                        stored_tournament_meta.get("winsorization_enabled", enable_winsorization)
+                        if stored_tournament_meta
+                        else enable_winsorization
+                    ),
+                    "winsor_lower": stored_tournament_meta.get("winsor_lower", winsor_lower) if stored_tournament_meta else winsor_lower,
+                    "winsor_upper": stored_tournament_meta.get("winsor_upper", winsor_upper) if stored_tournament_meta else winsor_upper,
+                    "minimum_history": (
+                        stored_tournament_meta.get("minimum_history", minimum_history)
+                        if stored_tournament_meta
+                        else minimum_history
+                    ),
+                }
             )
         metrics = tournament_result.firm_metrics
         forecast_panel = tournament_result.forecast_panel
@@ -1302,7 +1389,8 @@ elif view == "Tournament Summary":
             chart_left.plotly_chart(build_uncertainty_width_nli_figure(metrics), use_container_width=True)
             chart_right.plotly_chart(build_coverage_quartile_figure(metrics), use_container_width=True)
             st.plotly_chart(build_winner_distribution_figure(metrics), use_container_width=True)
-            st.dataframe(metrics.head(100), width="stretch")
+            with st.expander("Tournament firm metrics sample", expanded=False):
+                st.dataframe(metrics.head(100), width="stretch")
         if not forecast_panel.empty:
             st.subheader("Full-Dataset Forecast Views")
             st.caption(
@@ -1505,7 +1593,15 @@ elif view == "NLI Distribution":
             "distribution_limit": int(distribution_limit),
             "row_count": int(len(analysis_frame)),
             "entity_count": int(analysis_frame["entity_id"].nunique()),
+            "holdout_size": int(holdout_size),
+            "evaluation_mode": evaluation_mode,
+            "max_p": int(max_p),
+            "max_d": int(max_d),
+            "max_q": int(max_q),
             "winsorization_enabled": bool(enable_winsorization),
+            "winsor_lower": float(winsor_lower),
+            "winsor_upper": float(winsor_upper),
+            "minimum_history": int(minimum_history),
             "target_provenance": target_provenance.source_type,
         }
 
@@ -1545,6 +1641,10 @@ elif view == "NLI Distribution":
                 progress_callback=update_progress,
                 break_method=evaluation_mode,
                 strict_whitening=evaluation_mode == "strict",
+                max_p=max_p,
+                max_d=max_d,
+                max_q=max_q,
+                min_history=minimum_history,
             )
             st.session_state["nli_distribution_meta"] = distribution_meta
             progress_bar.progress(1.0, text="NLI distribution complete.")

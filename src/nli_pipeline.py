@@ -115,6 +115,10 @@ def compute_nli_distribution(
     progress_callback: Callable[[int, int, str], None] | None = None,
     break_method: str = "practical",
     strict_whitening: bool = False,
+    max_p: int = 2,
+    max_d: int = 2,
+    max_q: int = 2,
+    min_history: int = 10,
 ) -> NLIDistributionResult:
     rows = []
     failures = []
@@ -132,12 +136,16 @@ def compute_nli_distribution(
         if progress_callback is not None:
             progress_callback(processed_entities, total_entities, subset["entity_label"].iloc[0])
         series_frame = subset[["date", target_column]].rename(columns={target_column: "value"}).dropna()
-        if len(series_frame) < 10:
+        required_history = max(int(min_history), 10)
+        if len(series_frame) < required_history:
             skipped_short_series += 1
             continue
         try:
             result = compute_nli(
                 series_frame,
+                max_p=max_p,
+                max_d=max_d,
+                max_q=max_q,
                 break_method=break_method,
                 strict_whitening=strict_whitening,
             )

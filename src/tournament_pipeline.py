@@ -74,6 +74,7 @@ def compute_forecasting_tournament(
     chronos_deterministic: bool = True,
     chronos_seed: int = 17,
     chronos_samples: int = 20,
+    minimum_history: int = 10,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> ForecastTournamentResult:
     rows: list[dict] = []
@@ -97,13 +98,14 @@ def compute_forecasting_tournament(
 
         series_frame = subset[["date", target_column]].rename(columns={target_column: "value"}).dropna()
         series_frame = series_frame.sort_values("date").reset_index(drop=True)
-        if len(series_frame) < holdout_size + 10:
+        required_history = max(int(minimum_history), holdout_size + 10)
+        if len(series_frame) < required_history:
             skipped_entities += 1
             failures.append(
                 {
                     "entity_id": entity_id,
                     "entity_label": entity_label,
-                    "error": "Insufficient history for requested holdout and diagnostics.",
+                    "error": f"Insufficient history for requested holdout and diagnostics (need >= {required_history} rows).",
                 }
             )
             continue

@@ -61,3 +61,35 @@ def test_compute_forecasting_tournament_returns_firm_metrics(monkeypatch):
     assert not result.firm_forecast_summary.empty
     assert result.firm_forecast_summary.loc[0, "winner"] == "Chronos"
     assert result.firm_forecast_summary.loc[0, "holdout_points"] == 2
+
+
+def test_compute_forecasting_tournament_respects_minimum_history(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "entity_id": ["1"] * 12,
+            "entity_label": ["A (1)"] * 12,
+            "date": pd.date_range("2020-03-31", periods=12, freq="QE-DEC"),
+            "ROA": [0.1 + (idx * 0.01) for idx in range(12)],
+            "assets": [100.0] * 12,
+        }
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("Forecast routines should not run for insufficient history.")
+
+    monkeypatch.setattr("src.tournament_pipeline.compute_nli", fail_if_called)
+    monkeypatch.setattr("src.tournament_pipeline.run_naive_forecast", fail_if_called)
+    monkeypatch.setattr("src.tournament_pipeline.run_arima_forecast", fail_if_called)
+    monkeypatch.setattr("src.tournament_pipeline.run_chronos_forecast", fail_if_called)
+
+    result = compute_forecasting_tournament(
+        frame,
+        "ROA",
+        holdout_size=2,
+        max_entities=1,
+        minimum_history=20,
+    )
+
+    assert result.successful_entities == 0
+    assert result.failed_entities == 1
+    assert "need >= 20 rows" in result.failure_examples.loc[0, "error"]
