@@ -114,10 +114,12 @@ if "history_loaded" not in st.session_state:
     st.session_state["history_loaded"] = False
 if "history_loaded_label" not in st.session_state:
     st.session_state["history_loaded_label"] = ""
+if "compact_layout" not in st.session_state:
+    st.session_state["compact_layout"] = False
 
 
 def render_profile(profile) -> None:
-    left, middle, right, extra = st.columns(4)
+    left, middle, right, extra = responsive_columns(4, compact_count=2)
     left.metric("Rows", f"{profile.row_count:,}")
     middle.metric("Entities", f"{profile.entity_count:,}")
     right.metric("Columns", f"{profile.column_count:,}")
@@ -292,9 +294,23 @@ def build_display_metric_tables(metric_frames: list[pd.DataFrame]) -> tuple[pd.D
     return common_metrics, detail_metrics
 
 
+def responsive_columns(spec, compact_count: int = 1):
+    if not st.session_state.get("compact_layout", False):
+        return st.columns(spec)
+    if isinstance(spec, int):
+        return st.columns(min(spec, compact_count))
+    return st.columns(min(len(spec), compact_count))
+
+
 with st.sidebar:
     st.header("Upload")
     uploaded_file = st.file_uploader("CSV dataset", type=["csv"])
+    compact_layout = st.toggle(
+        "Compact/mobile layout",
+        value=bool(st.session_state.get("compact_layout", False)),
+        help="Use fewer side-by-side columns and stacked charts for smaller screens.",
+    )
+    st.session_state["compact_layout"] = bool(compact_layout)
     chronos_available, chronos_message = chronos_import_status()
     if chronos_available:
         st.success("Chronos dependency detected.")
@@ -372,7 +388,7 @@ if not metric_columns:
     st.error("No numeric target columns were detected after applying the schema mapping.")
     st.stop()
 
-overview_left, overview_right = st.columns([2, 1])
+overview_left, overview_right = responsive_columns([2, 1], compact_count=1)
 with overview_left:
     analysis_scope = st.selectbox(
         "Analysis scope",
@@ -451,7 +467,7 @@ eligibility_summary = build_entity_eligibility_summary(analysis_frame, target_co
 entity_series = build_target_series(analysis_frame, entity_id, target_column)
 
 with st.expander("Audit Summary", expanded=False):
-    audit_left, audit_middle, audit_right = st.columns(3)
+    audit_left, audit_middle, audit_right = responsive_columns(3, compact_count=1)
     audit_left.metric("Eligible firms", str(int(eligibility_summary["eligible"].sum())))
     audit_middle.metric("Excluded firms", str(int((~eligibility_summary["eligible"]).sum())))
     audit_right.metric("Winsorized rows", str(winsor_report.changed_rows))
@@ -711,12 +727,12 @@ if analysis_scope == "Single entity diagnostics":
     render_quality_badges(quality_labels)
 
     st.subheader("Transparency Diagnostics")
-    diag_left, diag_middle, diag_right = st.columns(3)
+    diag_left, diag_middle, diag_right = responsive_columns(3, compact_count=1)
     diag_left.metric("Selected ARIMA order", str(nli_result.arima_result.order))
     diag_middle.metric("Differencing order (d)", str(nli_result.arima_result.order[1]))
     diag_right.metric("NLI score (BDS z-stat)", f"{nli_result.nli_score:.3f}")
 
-    info_left, info_middle, info_right = st.columns(3)
+    info_left, info_middle, info_right = responsive_columns(3, compact_count=1)
     info_left.metric("BDS p-value", f"{nli_result.bds_pvalue:.4f}")
     info_middle.metric(
         "Tsay p-value",
@@ -724,7 +740,7 @@ if analysis_scope == "Single entity diagnostics":
     )
     info_right.metric("Break count", str(len(nli_result.break_result.break_indices)))
 
-    meta_left, meta_middle, meta_right = st.columns(3)
+    meta_left, meta_middle, meta_right = responsive_columns(3, compact_count=1)
     meta_left.metric("Holdout quarters", str(active_holdout_size))
     meta_middle.metric("Evaluation mode", active_evaluation_label)
     meta_right.metric("ARIMA failed windows", str(int(arima_forecast.metrics["failed_windows"].iloc[0])))
@@ -837,7 +853,7 @@ if analysis_scope == "Single entity diagnostics":
         st.dataframe(nli_result.arima_result.candidate_table, width="stretch")
 
     with st.expander("Residual Diagnostics", expanded=True):
-        left, right = st.columns(2)
+        left, right = responsive_columns(2, compact_count=1)
         left.dataframe(nli_result.ljung_box, width="stretch")
         right.write(
             {
@@ -858,7 +874,7 @@ view_options = (
     if analysis_scope == "Single entity diagnostics"
     else ["Dataset Summary", "Tournament Summary", "NLI Distribution", "Exports"]
 )
-view = st.radio("View", view_options, horizontal=True, key="dashboard_view")
+view = st.radio("View", view_options, horizontal=not st.session_state.get("compact_layout", False), key="dashboard_view")
 
 if view == "Forecasts":
     metric_frames = [naive_forecast.metrics, arima_forecast.metrics]
@@ -894,7 +910,7 @@ if view == "Forecasts":
             margin = 0.0
             summary = f"`ARIMA` and `Chronos` tied on `MASE` at `{arima_mase:.3f}`."
 
-        compare_left, compare_middle, compare_right = st.columns(3)
+        compare_left, compare_middle, compare_right = responsive_columns(3, compact_count=1)
         compare_left.metric("Better model", better_model)
         compare_middle.metric("ARIMA MASE", f"{arima_mase:.3f}")
         compare_right.metric("Chronos MASE", f"{chronos_mase:.3f}")
@@ -956,7 +972,7 @@ if view == "Forecasts":
             )
         else:
             st.subheader("Chronos Prediction Intervals")
-            interval_left, interval_right = st.columns(2)
+            interval_left, interval_right = responsive_columns(2, compact_count=1)
             interval_left.plotly_chart(
                 build_interval_forecast_figure(
                     result_entity_series,
@@ -1005,7 +1021,7 @@ if view == "Forecasts":
         st.dataframe(detail_metrics, width="stretch")
 
 elif view == "Residuals":
-    residual_left, residual_right = st.columns(2)
+    residual_left, residual_right = responsive_columns(2, compact_count=1)
     residual_left.plotly_chart(
         build_residual_figure(nli_result.arima_result.residuals),
         use_container_width=True,
@@ -1019,7 +1035,7 @@ elif view == "Dataset Summary":
     entity_summary = analysis_result["entity_summary"]
     full_distribution_result = analysis_result["full_distribution_result"]
     audit_summary = analysis_result["eligibility_summary"]
-    summary_left, summary_middle, summary_right = st.columns(3)
+    summary_left, summary_middle, summary_right = responsive_columns(3, compact_count=1)
     summary_left.metric("Processed firms", str(full_distribution_result.processed_entities))
     summary_middle.metric("Successful NLI scores", str(full_distribution_result.successful_entities))
     summary_right.metric("Failed firms", str(full_distribution_result.failed_entities))
@@ -1027,7 +1043,7 @@ elif view == "Dataset Summary":
         build_nli_distribution_figure(full_distribution_result.distribution, selected_entity=entity_id),
         use_container_width=True,
     )
-    summary_chart_left, summary_chart_right = st.columns(2)
+    summary_chart_left, summary_chart_right = responsive_columns(2, compact_count=1)
     summary_chart_left.plotly_chart(build_eligibility_figure(audit_summary), use_container_width=True)
     summary_chart_right.plotly_chart(
         build_nli_quartile_figure(full_distribution_result.distribution),
@@ -1061,7 +1077,7 @@ elif view == "Tournament Summary":
         "evaluation_mode": evaluation_mode,
         "winsorization_enabled": bool(enable_winsorization),
     }
-    tournament_left, tournament_right = st.columns([1, 1])
+    tournament_left, tournament_right = responsive_columns([1, 1], compact_count=1)
     compute_tournament = tournament_left.button("Compute Tournament Summary")
     clear_tournament = tournament_right.button("Clear Tournament Result")
 
@@ -1125,7 +1141,7 @@ elif view == "Tournament Summary":
                 f"across up to {stored_tournament_meta['tournament_limit']} firms."
             )
         metrics = tournament_result.firm_metrics
-        card_left, card_middle, card_right = st.columns(3)
+        card_left, card_middle, card_right = responsive_columns(3, compact_count=1)
         card_left.metric("Processed firms", str(tournament_result.processed_entities))
         card_middle.metric("Successful tournaments", str(tournament_result.successful_entities))
         card_right.metric("Failed firms", str(tournament_result.failed_entities))
@@ -1133,7 +1149,7 @@ elif view == "Tournament Summary":
             st.warning("No firms produced a valid tournament result with the current settings.")
         else:
             available_chronos = metrics.loc[metrics["chronos_available"]]
-            summary_left, summary_middle, summary_right = st.columns(3)
+            summary_left, summary_middle, summary_right = responsive_columns(3, compact_count=1)
             summary_left.metric("Chronos win rate", f"{metrics['chronos_beats_arima'].mean():.1%}")
             summary_middle.metric(
                 "Mean delta MASE",
@@ -1143,13 +1159,13 @@ elif view == "Tournament Summary":
                 "Mean Chronos coverage",
                 f"{available_chronos['chronos_coverage_rate'].mean():.1%}" if not available_chronos.empty else "N/A",
             )
-            chart_left, chart_right = st.columns(2)
+            chart_left, chart_right = responsive_columns(2, compact_count=1)
             chart_left.plotly_chart(build_tournament_gap_scatter(metrics), use_container_width=True)
             chart_right.plotly_chart(build_volatility_gap_figure(metrics), use_container_width=True)
-            chart_left, chart_right = st.columns(2)
+            chart_left, chart_right = responsive_columns(2, compact_count=1)
             chart_left.plotly_chart(build_tournament_leaderboard_figure(metrics), use_container_width=True)
             chart_right.plotly_chart(build_tournament_quartile_win_figure(metrics), use_container_width=True)
-            chart_left, chart_right = st.columns(2)
+            chart_left, chart_right = responsive_columns(2, compact_count=1)
             chart_left.plotly_chart(build_uncertainty_width_nli_figure(metrics), use_container_width=True)
             chart_right.plotly_chart(build_coverage_quartile_figure(metrics), use_container_width=True)
             st.plotly_chart(build_winner_distribution_figure(metrics), use_container_width=True)
@@ -1181,7 +1197,7 @@ elif view == "NLI Distribution":
         "target_provenance": target_provenance.source_type,
     }
 
-    action_left, action_right = st.columns([1, 1])
+    action_left, action_right = responsive_columns([1, 1], compact_count=1)
     compute_distribution = action_left.button("Compute NLI Distribution")
     clear_distribution = action_right.button("Clear Distribution Result")
 
@@ -1243,7 +1259,7 @@ elif view == "NLI Distribution":
             f"Showing saved distribution for `{stored_meta['target_column']}` across "
             f"{stored_meta['distribution_limit']} firms."
         )
-        summary_left, summary_middle, summary_right = st.columns(3)
+        summary_left, summary_middle, summary_right = responsive_columns(3, compact_count=1)
         summary_left.metric("Processed firms", str(distribution_result.processed_entities))
         summary_middle.metric("Successful NLI scores", str(distribution_result.successful_entities))
         summary_right.metric("Failed firms", str(distribution_result.failed_entities))
