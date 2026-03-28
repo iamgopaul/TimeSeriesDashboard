@@ -1,0 +1,20 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+
+# Virtual environments
+.venv/
+venv/
+
+# Streamlit and local dashboard state
+.streamlit/
+.dashboard_history/
+
+# Editor or local scratch files
+.idea/
+.vscode/
