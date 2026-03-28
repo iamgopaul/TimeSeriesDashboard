@@ -25,6 +25,19 @@ class ForecastTournamentResult:
     failure_examples: pd.DataFrame
 
 
+@dataclass
+class ForecastTournamentChunkResult:
+    firm_metrics: pd.DataFrame
+    forecast_panel: pd.DataFrame
+    firm_forecast_summary: pd.DataFrame
+    failures: pd.DataFrame
+    processed_entities: int
+    skipped_entities: int
+    next_index: int
+    total_entities: int
+    completed: bool
+
+
 FORECAST_PANEL_COLUMNS = [
     "entity_id",
     "entity_label",
@@ -83,18 +96,92 @@ def compute_forecasting_tournament(
     failures: list[dict] = []
     processed_entities = 0
     skipped_entities = 0
-    grouped = frame.groupby("entity_id", sort=True)
     total_entities = frame["entity_id"].nunique()
     if max_entities is not None:
         total_entities = min(total_entities, max_entities)
 
+    start_index = 0
+    while start_index < total_entities:
+        chunk = compute_forecasting_tournament_chunk(
+            frame,
+            target_column,
+            holdout_size=holdout_size,
+            start_index=start_index,
+            batch_size=max(1, min(100, total_entities - start_index)),
+            max_entities=max_entities,
+            run_chronos=run_chronos,
+            evaluation_mode=evaluation_mode,
+            max_p=max_p,
+            max_d=max_d,
+            max_q=max_q,
+            chronos_deterministic=chronos_deterministic,
+            chronos_seed=chronos_seed,
+            chronos_samples=chronos_samples,
+            minimum_history=minimum_history,
+            progress_callback=progress_callback,
+        )
+        rows.extend(chunk.firm_metrics.to_dict("records"))
+        if not chunk.forecast_panel.empty:
+            forecast_frames.append(chunk.forecast_panel)
+        summary_rows.extend(chunk.firm_forecast_summary.to_dict("records"))
+        failures.extend(chunk.failures.to_dict("records"))
+        processed_entities += chunk.processed_entities
+        skipped_entities += chunk.skipped_entities
+        start_index = chunk.next_index
+        if chunk.completed:
+            break
+
+    return build_forecasting_tournament_result(
+        firm_metrics_rows=rows,
+        forecast_panel_rows=pd.concat(forecast_frames, ignore_index=True) if forecast_frames else pd.DataFrame(columns=FORECAST_PANEL_COLUMNS),
+        firm_forecast_summary_rows=summary_rows,
+        failures=failures,
+        processed_entities=processed_entities,
+        skipped_entities=skipped_entities,
+        requested_entities=total_entities,
+    )
+
+
+def compute_forecasting_tournament_chunk(
+    frame: pd.DataFrame,
+    target_column: str,
+    holdout_size: int,
+    start_index: int,
+    batch_size: int,
+    max_entities: int | None = None,
+    run_chronos: bool = True,
+    evaluation_mode: str = "strict",
+    max_p: int = 2,
+    max_d: int = 2,
+    max_q: int = 2,
+    chronos_deterministic: bool = True,
+    chronos_seed: int = 17,
+    chronos_samples: int = 20,
+    minimum_history: int = 10,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> ForecastTournamentChunkResult:
+    rows: list[dict] = []
+    forecast_frames: list[pd.DataFrame] = []
+    summary_rows: list[dict] = []
+    failures: list[dict] = []
+    processed_entities = 0
+    skipped_entities = 0
+    grouped = frame.groupby("entity_id", sort=True)
+    total_entities = frame["entity_id"].nunique()
+    if max_entities is not None:
+        total_entities = min(total_entities, max_entities)
+    start_index = max(0, int(start_index))
+    end_index = min(total_entities, start_index + max(1, int(batch_size)))
+
     for index, (entity_id, subset) in enumerate(grouped):
-        if max_entities is not None and index >= max_entities:
+        if index < start_index:
+            continue
+        if index >= end_index or (max_entities is not None and index >= max_entities):
             break
         processed_entities += 1
         entity_label = str(subset["entity_label"].iloc[0])
         if progress_callback is not None:
-            progress_callback(processed_entities, total_entities, entity_label)
+            progress_callback(start_index + processed_entities, total_entities, entity_label)
 
         series_frame = subset[["date", target_column]].rename(columns={target_column: "value"}).dropna()
         series_frame = series_frame.sort_values("date").reset_index(drop=True)
@@ -219,24 +306,52 @@ def compute_forecasting_tournament(
             }
         )
 
-    firm_metrics = pd.DataFrame(rows)
+    next_index = end_index
+    return ForecastTournamentChunkResult(
+        firm_metrics=pd.DataFrame(rows),
+        forecast_panel=pd.concat(forecast_frames, ignore_index=True) if forecast_frames else pd.DataFrame(columns=FORECAST_PANEL_COLUMNS),
+        firm_forecast_summary=pd.DataFrame(summary_rows),
+        failures=pd.DataFrame(failures, columns=["entity_id", "entity_label", "error"]),
+        processed_entities=processed_entities,
+        skipped_entities=skipped_entities,
+        next_index=next_index,
+        total_entities=total_entities,
+        completed=next_index >= total_entities,
+    )
+
+
+def build_forecasting_tournament_result(
+    firm_metrics_rows: list[dict] | pd.DataFrame,
+    forecast_panel_rows: list[dict] | pd.DataFrame,
+    firm_forecast_summary_rows: list[dict] | pd.DataFrame,
+    failures: list[dict] | pd.DataFrame,
+    processed_entities: int,
+    skipped_entities: int,
+    requested_entities: int,
+) -> ForecastTournamentResult:
+    firm_metrics = pd.DataFrame(firm_metrics_rows)
     if not firm_metrics.empty:
         firm_metrics = firm_metrics.sort_values(["delta_mase", "entity_label"], ascending=[False, True]).reset_index(drop=True)
-    forecast_panel = pd.concat(forecast_frames, ignore_index=True) if forecast_frames else pd.DataFrame(columns=FORECAST_PANEL_COLUMNS)
-    if not forecast_panel.empty:
+    forecast_panel = pd.DataFrame(forecast_panel_rows)
+    if forecast_panel.empty:
+        forecast_panel = pd.DataFrame(columns=FORECAST_PANEL_COLUMNS)
+    else:
         forecast_panel = forecast_panel.sort_values(["entity_label", "model", "date"]).reset_index(drop=True)
-    firm_forecast_summary = pd.DataFrame(summary_rows)
+    firm_forecast_summary = pd.DataFrame(firm_forecast_summary_rows)
     if not firm_forecast_summary.empty:
         firm_forecast_summary = firm_forecast_summary.sort_values(["winner", "entity_label"]).reset_index(drop=True)
-    failure_examples = pd.DataFrame(failures, columns=["entity_id", "entity_label", "error"]).head(20)
+    failure_frame = pd.DataFrame(failures)
+    if failure_frame.empty:
+        failure_frame = pd.DataFrame(columns=["entity_id", "entity_label", "error"])
+    failure_examples = failure_frame.head(20).reset_index(drop=True)
     return ForecastTournamentResult(
         firm_metrics=firm_metrics,
         forecast_panel=forecast_panel,
         firm_forecast_summary=firm_forecast_summary,
-        requested_entities=total_entities,
-        processed_entities=processed_entities,
+        requested_entities=int(requested_entities),
+        processed_entities=int(processed_entities),
         successful_entities=int(len(firm_metrics)),
-        skipped_entities=skipped_entities,
-        failed_entities=int(len(failures)),
+        skipped_entities=int(skipped_entities),
+        failed_entities=int(len(failure_frame)),
         failure_examples=failure_examples,
     )

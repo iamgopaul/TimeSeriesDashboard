@@ -50,7 +50,11 @@ from src.nli_pipeline import (
     compute_nli_distribution_chunk,
 )
 from src.schema_mapper import CANONICAL_FIELDS, build_mapping_options, describe_mapping, infer_schema_mapping, validate_mapping
-from src.tournament_pipeline import compute_forecasting_tournament
+from src.tournament_pipeline import (
+    build_forecasting_tournament_result,
+    compute_forecasting_tournament,
+    compute_forecasting_tournament_chunk,
+)
 from src.visuals import (
     build_combined_forecast_figure,
     build_cumulative_error_figure,
@@ -86,7 +90,11 @@ except Exception:
 _EXECUTION_STEP_PLACEHOLDER = None
 _EXECUTION_LOG_PLACEHOLDER = None
 FULL_DATASET_NLI_BATCH_SIZE = 25
+NLI_DISTRIBUTION_BATCH_SIZE = 25
+FULL_DATASET_FORECAST_BATCH_SIZE = 25
 FULL_DATASET_ANALYSIS_JOB_TYPE = "full_dataset_analysis"
+NLI_DISTRIBUTION_JOB_TYPE = "nli_distribution"
+FULL_DATASET_FORECAST_JOB_TYPE = "full_dataset_forecast"
 FULL_CLEANED_DATASET_SCOPE = "Full Cleaned Dataset"
 LEGACY_FULL_CLEANED_DATASET_SCOPE = "Full cleaned dataset summary"
 FULL_DATASET_FORECAST_VIEW = "Full Cleaned Forecast Analysis"
@@ -1428,8 +1436,36 @@ elif view == FULL_DATASET_FORECAST_VIEW:
             "winsor_upper": float(winsor_upper),
             "minimum_history": int(minimum_history),
         }
+        tournament_matching_checkpoint = None
+        resume_tournament = False
+        tournament_dataset_signature = hashlib.sha256(upload_bytes).hexdigest()
+        tournament_run_key = build_checkpoint_run_key(tournament_meta, tournament_dataset_signature, mapping)
+        tournament_checkpoint_entries = list_run_checkpoints(
+            job_type=FULL_DATASET_FORECAST_JOB_TYPE,
+            run_key=tournament_run_key,
+        )
+        if not tournament_checkpoint_entries.empty:
+            tournament_incomplete = tournament_checkpoint_entries.loc[tournament_checkpoint_entries["status"] != "completed"]
+            if not tournament_incomplete.empty:
+                tournament_matching_checkpoint = tournament_incomplete.iloc[0]
+                checkpoint_payload = load_run_checkpoint(str(tournament_matching_checkpoint["id"]))
+                checkpoint_processed = int(checkpoint_payload.get("processed_entities", 0) or 0)
+                checkpoint_total = int(checkpoint_payload.get("total_entities", int(tournament_limit)) or int(tournament_limit))
+                st.info(
+                    f"Interrupted full cleaned forecast analysis found: `{checkpoint_processed}/{checkpoint_total}` firms processed. "
+                    "Resume it to continue from the last saved batch, or discard it and start over."
+                )
+                resume_left, resume_right = responsive_columns([1, 1], compact_count=1)
+                resume_tournament = resume_left.button("Resume Interrupted Forecast Analysis")
+                discard_tournament_checkpoint = resume_right.button("Discard Interrupted Forecast Analysis")
+                if discard_tournament_checkpoint:
+                    delete_run_checkpoint(str(tournament_matching_checkpoint["id"]))
+                    st.rerun()
+        st.caption(
+            f"Full cleaned forecast analysis checkpoints every `{FULL_DATASET_FORECAST_BATCH_SIZE}` firms so interrupted runs can resume."
+        )
         tournament_left, tournament_right = responsive_columns([1, 1], compact_count=1)
-        compute_tournament = tournament_left.button("Compute Full Cleaned Forecast Analysis")
+        compute_tournament = tournament_left.button("Compute Full Cleaned Forecast Analysis") or resume_tournament
         clear_tournament = tournament_right.button("Clear Tournament Result")
 
         if clear_tournament:
@@ -1444,6 +1480,7 @@ elif view == FULL_DATASET_FORECAST_VIEW:
             update_step_status("Compute tournament", "running", f"Limit={int(tournament_limit)}")
             progress_bar = st.progress(0, text="Preparing tournament run...")
             progress_state = {"last_logged_processed": 0}
+            checkpoint_label = f"{FULL_DATASET_FORECAST_VIEW} | {target_column} | top {int(tournament_limit)}"
 
             def update_tournament_progress(processed: int, total: int, label: str) -> None:
                 denominator = max(total, 1)
@@ -1452,21 +1489,114 @@ elif view == FULL_DATASET_FORECAST_VIEW:
                     append_execution_log(f"Tournament progress {processed}/{denominator}. Current firm: {label}")
                     progress_state["last_logged_processed"] = processed
 
-            st.session_state["tournament_result"] = compute_forecasting_tournament(
-                analysis_frame,
-                target_column,
-                holdout_size=holdout_size,
-                max_entities=int(tournament_limit),
-                run_chronos=bool(tournament_run_chronos),
-                evaluation_mode=evaluation_mode,
-                max_p=max_p,
-                max_d=max_d,
-                max_q=max_q,
-                chronos_deterministic=chronos_deterministic,
-                chronos_seed=chronos_seed,
-                chronos_samples=chronos_samples,
-                minimum_history=minimum_history,
-                progress_callback=update_tournament_progress,
+            if resume_tournament and tournament_matching_checkpoint is not None:
+                checkpoint_id = str(tournament_matching_checkpoint["id"])
+                checkpoint_payload = load_run_checkpoint(checkpoint_id)
+                firm_metrics_rows = checkpoint_payload.get("firm_metrics_rows", pd.DataFrame())
+                forecast_panel_rows = checkpoint_payload.get("forecast_panel_rows", pd.DataFrame())
+                firm_forecast_summary_rows = checkpoint_payload.get("firm_forecast_summary_rows", pd.DataFrame())
+                failure_rows = checkpoint_payload.get("failure_rows", pd.DataFrame())
+                processed_entities = int(checkpoint_payload.get("processed_entities", 0) or 0)
+                skipped_entities = int(checkpoint_payload.get("skipped_entities", 0) or 0)
+                next_index = int(checkpoint_payload.get("next_index", 0) or 0)
+                total_entities = int(checkpoint_payload.get("total_entities", int(tournament_limit)) or int(tournament_limit))
+                append_execution_log(
+                    f"Resuming interrupted forecast analysis from checkpoint at {processed_entities}/{total_entities} firms."
+                )
+            else:
+                if tournament_matching_checkpoint is not None:
+                    delete_run_checkpoint(str(tournament_matching_checkpoint["id"]))
+                firm_metrics_rows = pd.DataFrame()
+                forecast_panel_rows = pd.DataFrame()
+                firm_forecast_summary_rows = pd.DataFrame()
+                failure_rows = pd.DataFrame(columns=["entity_id", "entity_label", "error"])
+                processed_entities = 0
+                skipped_entities = 0
+                next_index = 0
+                total_entities = min(int(analysis_frame["entity_id"].nunique()), int(tournament_limit))
+                checkpoint_id = save_run_checkpoint(
+                    {
+                        "tournament_meta": tournament_meta,
+                        "firm_metrics_rows": firm_metrics_rows,
+                        "forecast_panel_rows": forecast_panel_rows,
+                        "firm_forecast_summary_rows": firm_forecast_summary_rows,
+                        "failure_rows": failure_rows,
+                        "processed_entities": processed_entities,
+                        "skipped_entities": skipped_entities,
+                        "next_index": next_index,
+                        "total_entities": total_entities,
+                    },
+                    job_type=FULL_DATASET_FORECAST_JOB_TYPE,
+                    status="running",
+                    label=checkpoint_label,
+                    run_key=tournament_run_key,
+                )
+                append_execution_log(
+                    f"Created resumable checkpoint for full cleaned forecast analysis. Batch size={FULL_DATASET_FORECAST_BATCH_SIZE}."
+                )
+
+            while next_index < total_entities:
+                chunk = compute_forecasting_tournament_chunk(
+                    analysis_frame,
+                    target_column,
+                    holdout_size=holdout_size,
+                    start_index=next_index,
+                    batch_size=FULL_DATASET_FORECAST_BATCH_SIZE,
+                    max_entities=int(tournament_limit),
+                    run_chronos=bool(tournament_run_chronos),
+                    evaluation_mode=evaluation_mode,
+                    max_p=max_p,
+                    max_d=max_d,
+                    max_q=max_q,
+                    chronos_deterministic=chronos_deterministic,
+                    chronos_seed=chronos_seed,
+                    chronos_samples=chronos_samples,
+                    minimum_history=minimum_history,
+                    progress_callback=update_tournament_progress,
+                )
+                if not chunk.firm_metrics.empty:
+                    firm_metrics_rows = pd.concat([pd.DataFrame(firm_metrics_rows), chunk.firm_metrics], ignore_index=True)
+                if not chunk.forecast_panel.empty:
+                    forecast_panel_rows = pd.concat([pd.DataFrame(forecast_panel_rows), chunk.forecast_panel], ignore_index=True)
+                if not chunk.firm_forecast_summary.empty:
+                    firm_forecast_summary_rows = pd.concat(
+                        [pd.DataFrame(firm_forecast_summary_rows), chunk.firm_forecast_summary], ignore_index=True
+                    )
+                if not chunk.failures.empty:
+                    failure_rows = pd.concat([pd.DataFrame(failure_rows), chunk.failures], ignore_index=True)
+                processed_entities += chunk.processed_entities
+                skipped_entities += chunk.skipped_entities
+                next_index = chunk.next_index
+                save_run_checkpoint(
+                    {
+                        "tournament_meta": tournament_meta,
+                        "firm_metrics_rows": firm_metrics_rows,
+                        "forecast_panel_rows": forecast_panel_rows,
+                        "firm_forecast_summary_rows": firm_forecast_summary_rows,
+                        "failure_rows": failure_rows,
+                        "processed_entities": processed_entities,
+                        "skipped_entities": skipped_entities,
+                        "next_index": next_index,
+                        "total_entities": total_entities,
+                    },
+                    job_type=FULL_DATASET_FORECAST_JOB_TYPE,
+                    status="running",
+                    label=checkpoint_label,
+                    run_key=tournament_run_key,
+                    checkpoint_id=checkpoint_id,
+                )
+                append_execution_log(f"Saved forecast-analysis checkpoint at {next_index}/{total_entities} firms.")
+                if chunk.completed:
+                    break
+
+            st.session_state["tournament_result"] = build_forecasting_tournament_result(
+                firm_metrics_rows=firm_metrics_rows,
+                forecast_panel_rows=forecast_panel_rows,
+                firm_forecast_summary_rows=firm_forecast_summary_rows,
+                failures=failure_rows,
+                processed_entities=processed_entities,
+                skipped_entities=skipped_entities,
+                requested_entities=total_entities,
             )
             st.session_state["tournament_meta"] = tournament_meta
             tournament_result = st.session_state["tournament_result"]
@@ -1481,6 +1611,24 @@ elif view == FULL_DATASET_FORECAST_VIEW:
                 f"Processed={tournament_result.processed_entities}, "
                 f"Successful={tournament_result.successful_entities}, "
                 f"Failed={tournament_result.failed_entities}."
+            )
+            save_run_checkpoint(
+                {
+                    "tournament_meta": tournament_meta,
+                    "firm_metrics_rows": firm_metrics_rows,
+                    "forecast_panel_rows": forecast_panel_rows,
+                    "firm_forecast_summary_rows": firm_forecast_summary_rows,
+                    "failure_rows": failure_rows,
+                    "processed_entities": processed_entities,
+                    "skipped_entities": skipped_entities,
+                    "next_index": total_entities,
+                    "total_entities": total_entities,
+                },
+                job_type=FULL_DATASET_FORECAST_JOB_TYPE,
+                status="completed",
+                label=checkpoint_label,
+                run_key=tournament_run_key,
+                checkpoint_id=checkpoint_id,
             )
             save_current_snapshot("tournament", f"Tournament | {target_column} | top {int(tournament_limit)}")
     else:
@@ -1780,9 +1928,37 @@ elif view == "NLI Distribution":
             "minimum_history": int(minimum_history),
             "target_provenance": target_provenance.source_type,
         }
+        distribution_matching_checkpoint = None
+        resume_distribution = False
+        distribution_dataset_signature = hashlib.sha256(upload_bytes).hexdigest()
+        distribution_run_key = build_checkpoint_run_key(distribution_meta, distribution_dataset_signature, mapping)
+        distribution_checkpoint_entries = list_run_checkpoints(
+            job_type=NLI_DISTRIBUTION_JOB_TYPE,
+            run_key=distribution_run_key,
+        )
+        if not distribution_checkpoint_entries.empty:
+            distribution_incomplete = distribution_checkpoint_entries.loc[distribution_checkpoint_entries["status"] != "completed"]
+            if not distribution_incomplete.empty:
+                distribution_matching_checkpoint = distribution_incomplete.iloc[0]
+                checkpoint_payload = load_run_checkpoint(str(distribution_matching_checkpoint["id"]))
+                checkpoint_processed = int(checkpoint_payload.get("processed_entities", 0) or 0)
+                checkpoint_total = int(checkpoint_payload.get("total_entities", int(distribution_limit)) or int(distribution_limit))
+                st.info(
+                    f"Interrupted NLI distribution found: `{checkpoint_processed}/{checkpoint_total}` firms processed. "
+                    "Resume it to continue from the last saved batch, or discard it and start over."
+                )
+                resume_left, resume_right = responsive_columns([1, 1], compact_count=1)
+                resume_distribution = resume_left.button("Resume Interrupted NLI Distribution")
+                discard_distribution_checkpoint = resume_right.button("Discard Interrupted NLI Distribution")
+                if discard_distribution_checkpoint:
+                    delete_run_checkpoint(str(distribution_matching_checkpoint["id"]))
+                    st.rerun()
+        st.caption(
+            f"NLI distribution checkpoints every `{NLI_DISTRIBUTION_BATCH_SIZE}` firms so interrupted runs can resume."
+        )
 
         action_left, action_right = responsive_columns([1, 1], compact_count=1)
-        compute_distribution = action_left.button("Compute NLI Distribution")
+        compute_distribution = action_left.button("Compute NLI Distribution") or resume_distribution
         clear_distribution = action_right.button("Clear Distribution Result")
 
         if clear_distribution:
@@ -1798,6 +1974,7 @@ elif view == "NLI Distribution":
             progress_bar = st.progress(0, text="Preparing NLI distribution run...")
             status_placeholder = st.empty()
             progress_state = {"last_logged_processed": 0}
+            checkpoint_label = f"NLI Distribution | {target_column} | top {int(distribution_limit)}"
 
             def update_progress(processed: int, total: int, label: str) -> None:
                 denominator = max(total, 1)
@@ -1810,17 +1987,96 @@ elif view == "NLI Distribution":
                     append_execution_log(f"Distribution progress {processed}/{denominator}. Current firm: {label}")
                     progress_state["last_logged_processed"] = processed
 
-            st.session_state["nli_distribution_result"] = compute_nli_distribution(
-                analysis_frame,
-                target_column,
-                max_entities=int(distribution_limit),
-                progress_callback=update_progress,
-                break_method=evaluation_mode,
-                strict_whitening=evaluation_mode == "strict",
-                max_p=max_p,
-                max_d=max_d,
-                max_q=max_q,
-                min_history=minimum_history,
+            if resume_distribution and distribution_matching_checkpoint is not None:
+                checkpoint_id = str(distribution_matching_checkpoint["id"])
+                checkpoint_payload = load_run_checkpoint(checkpoint_id)
+                distribution_rows = checkpoint_payload.get("distribution_rows", pd.DataFrame())
+                failure_rows = checkpoint_payload.get("failure_rows", pd.DataFrame())
+                processed_entities = int(checkpoint_payload.get("processed_entities", 0) or 0)
+                skipped_short_series = int(checkpoint_payload.get("skipped_short_series", 0) or 0)
+                next_index = int(checkpoint_payload.get("next_index", 0) or 0)
+                total_entities = int(checkpoint_payload.get("total_entities", int(distribution_limit)) or int(distribution_limit))
+                append_execution_log(
+                    f"Resuming interrupted NLI distribution from checkpoint at {processed_entities}/{total_entities} firms."
+                )
+            else:
+                if distribution_matching_checkpoint is not None:
+                    delete_run_checkpoint(str(distribution_matching_checkpoint["id"]))
+                distribution_rows = pd.DataFrame(
+                    columns=["entity_id", "entity_label", "nli_score", "arima_order", "break_count", "break_method"]
+                )
+                failure_rows = pd.DataFrame(columns=["entity_id", "entity_label", "error"])
+                processed_entities = 0
+                skipped_short_series = 0
+                next_index = 0
+                total_entities = min(int(analysis_frame["entity_id"].nunique()), int(distribution_limit))
+                checkpoint_id = save_run_checkpoint(
+                    {
+                        "distribution_meta": distribution_meta,
+                        "distribution_rows": distribution_rows,
+                        "failure_rows": failure_rows,
+                        "processed_entities": processed_entities,
+                        "skipped_short_series": skipped_short_series,
+                        "next_index": next_index,
+                        "total_entities": total_entities,
+                    },
+                    job_type=NLI_DISTRIBUTION_JOB_TYPE,
+                    status="running",
+                    label=checkpoint_label,
+                    run_key=distribution_run_key,
+                )
+                append_execution_log(
+                    f"Created resumable checkpoint for NLI distribution. Batch size={NLI_DISTRIBUTION_BATCH_SIZE}."
+                )
+
+            while next_index < total_entities:
+                chunk = compute_nli_distribution_chunk(
+                    analysis_frame,
+                    target_column,
+                    start_index=next_index,
+                    batch_size=NLI_DISTRIBUTION_BATCH_SIZE,
+                    max_entities=int(distribution_limit),
+                    progress_callback=update_progress,
+                    break_method=evaluation_mode,
+                    strict_whitening=evaluation_mode == "strict",
+                    max_p=max_p,
+                    max_d=max_d,
+                    max_q=max_q,
+                    min_history=minimum_history,
+                )
+                if not chunk.distribution.empty:
+                    distribution_rows = pd.concat([pd.DataFrame(distribution_rows), chunk.distribution], ignore_index=True)
+                if not chunk.failures.empty:
+                    failure_rows = pd.concat([pd.DataFrame(failure_rows), chunk.failures], ignore_index=True)
+                processed_entities += chunk.processed_entities
+                skipped_short_series += chunk.skipped_short_series
+                next_index = chunk.next_index
+                save_run_checkpoint(
+                    {
+                        "distribution_meta": distribution_meta,
+                        "distribution_rows": distribution_rows,
+                        "failure_rows": failure_rows,
+                        "processed_entities": processed_entities,
+                        "skipped_short_series": skipped_short_series,
+                        "next_index": next_index,
+                        "total_entities": total_entities,
+                    },
+                    job_type=NLI_DISTRIBUTION_JOB_TYPE,
+                    status="running",
+                    label=checkpoint_label,
+                    run_key=distribution_run_key,
+                    checkpoint_id=checkpoint_id,
+                )
+                append_execution_log(f"Saved NLI distribution checkpoint at {next_index}/{total_entities} firms.")
+                if chunk.completed:
+                    break
+
+            st.session_state["nli_distribution_result"] = build_nli_distribution_result(
+                distribution_rows,
+                failure_rows,
+                processed_entities=processed_entities,
+                skipped_short_series=skipped_short_series,
+                requested_entities=total_entities,
             )
             st.session_state["nli_distribution_meta"] = distribution_meta
             progress_bar.progress(1.0, text="NLI distribution complete.")
@@ -1836,6 +2092,22 @@ elif view == "NLI Distribution":
                 f"Processed={distribution_result.processed_entities}, "
                 f"Successful={distribution_result.successful_entities}, "
                 f"Failed={distribution_result.failed_entities}."
+            )
+            save_run_checkpoint(
+                {
+                    "distribution_meta": distribution_meta,
+                    "distribution_rows": distribution_rows,
+                    "failure_rows": failure_rows,
+                    "processed_entities": processed_entities,
+                    "skipped_short_series": skipped_short_series,
+                    "next_index": total_entities,
+                    "total_entities": total_entities,
+                },
+                job_type=NLI_DISTRIBUTION_JOB_TYPE,
+                status="completed",
+                label=checkpoint_label,
+                run_key=distribution_run_key,
+                checkpoint_id=checkpoint_id,
             )
             save_current_snapshot("distribution", f"NLI Distribution | {target_column} | top {int(distribution_limit)}")
     else:
