@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
+import json
 from typing import Dict
 import warnings
 
@@ -13,6 +15,12 @@ from src.arima_pipeline import (
 )
 from src.break_detection import exact_break_detection_status
 from src.chronos_pipeline import chronos_import_status, expanding_window_forecast as run_chronos_forecast
+from src.checkpoint_store import (
+    delete_run_checkpoint,
+    list_run_checkpoints,
+    load_run_checkpoint,
+    save_run_checkpoint,
+)
 from src.data_pipeline import (
     TargetProvenance,
     WinsorizationReport,
@@ -35,7 +43,12 @@ from src.history_store import (
     load_history_snapshot,
     save_history_snapshot,
 )
-from src.nli_pipeline import compute_nli, compute_nli_distribution
+from src.nli_pipeline import (
+    build_nli_distribution_result,
+    compute_nli,
+    compute_nli_distribution,
+    compute_nli_distribution_chunk,
+)
 from src.schema_mapper import CANONICAL_FIELDS, build_mapping_options, describe_mapping, infer_schema_mapping, validate_mapping
 from src.tournament_pipeline import compute_forecasting_tournament
 from src.visuals import (
@@ -72,6 +85,8 @@ except Exception:
 
 _EXECUTION_STEP_PLACEHOLDER = None
 _EXECUTION_LOG_PLACEHOLDER = None
+FULL_DATASET_NLI_BATCH_SIZE = 25
+FULL_DATASET_ANALYSIS_JOB_TYPE = "full_dataset_analysis"
 FULL_CLEANED_DATASET_SCOPE = "Full Cleaned Dataset"
 LEGACY_FULL_CLEANED_DATASET_SCOPE = "Full cleaned dataset summary"
 FULL_DATASET_FORECAST_VIEW = "Full Cleaned Forecast Analysis"
@@ -156,6 +171,20 @@ def normalize_analysis_scope(scope_name: str | None) -> str:
     if scope_name == LEGACY_FULL_CLEANED_DATASET_SCOPE:
         return FULL_CLEANED_DATASET_SCOPE
     return str(scope_name or "Single entity diagnostics")
+
+
+def build_checkpoint_run_key(
+    analysis_meta: dict[str, object],
+    dataset_signature: str,
+    mapping: dict[str, str],
+) -> str:
+    key_payload = {
+        "analysis_meta": analysis_meta,
+        "dataset_signature": dataset_signature,
+        "mapping": mapping,
+    }
+    encoded = json.dumps(key_payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def reset_execution_console() -> None:
@@ -427,6 +456,8 @@ with st.sidebar:
 history_loaded = bool(st.session_state.get("history_loaded"))
 snapshot_ready = history_loaded and st.session_state.get("analysis_result") is not None
 dataset_uploaded = uploaded_file is not None
+matching_checkpoint = None
+resume_full_dataset_analysis = False
 
 if not dataset_uploaded and not snapshot_ready:
     st.info("Upload a CSV file to begin, or load a saved history snapshot.")
@@ -614,6 +645,36 @@ if dataset_uploaded:
         "strict_breaks_available": bool(strict_breaks_available),
     }
 
+    matching_checkpoint = None
+    resume_full_dataset_analysis = False
+    if analysis_scope == FULL_CLEANED_DATASET_SCOPE:
+        dataset_signature = hashlib.sha256(upload_bytes).hexdigest()
+        checkpoint_run_key = build_checkpoint_run_key(analysis_meta, dataset_signature, mapping)
+        checkpoint_entries = list_run_checkpoints(
+            job_type=FULL_DATASET_ANALYSIS_JOB_TYPE,
+            run_key=checkpoint_run_key,
+        )
+        if not checkpoint_entries.empty:
+            incomplete_entries = checkpoint_entries.loc[checkpoint_entries["status"] != "completed"]
+            if not incomplete_entries.empty:
+                matching_checkpoint = incomplete_entries.iloc[0]
+                checkpoint_payload = load_run_checkpoint(str(matching_checkpoint["id"]))
+                checkpoint_processed = int(checkpoint_payload.get("processed_entities", 0) or 0)
+                checkpoint_total = int(checkpoint_payload.get("total_entities", 0) or 0)
+                st.info(
+                    f"Interrupted full cleaned dataset analysis found: `{checkpoint_processed}/{checkpoint_total}` firms processed. "
+                    "Resume it to continue from the last saved batch, or discard it and start over."
+                )
+                resume_left, resume_right = responsive_columns([1, 1], compact_count=1)
+                resume_full_dataset_analysis = resume_left.button("Resume Interrupted Analysis")
+                discard_checkpoint = resume_right.button("Discard Interrupted Analysis")
+                if discard_checkpoint:
+                    delete_run_checkpoint(str(matching_checkpoint["id"]))
+                    st.rerun()
+        st.caption(
+            f"Full cleaned dataset analysis checkpoints every `{FULL_DATASET_NLI_BATCH_SIZE}` firms so interrupted runs can resume."
+        )
+
     run_analysis = st.button("Run Analysis", type="primary")
     cached_analysis_meta = st.session_state.get("analysis_meta")
     has_matching_analysis = (
@@ -780,6 +841,7 @@ if run_analysis:
             status.write("Step 2/3: Compute full-dataset NLI distribution across all cleaned firms.")
             progress_bar = st.progress(0, text="Preparing full-dataset NLI run...")
             progress_state = {"last_logged_processed": 0}
+            checkpoint_label = f"{analysis_scope} | {target_column}"
 
             def update_progress(processed: int, total: int, label: str) -> None:
                 denominator = max(total, 1)
@@ -791,17 +853,99 @@ if run_analysis:
                     append_execution_log(f"NLI distribution progress {processed}/{denominator}. Current firm: {label}")
                     progress_state["last_logged_processed"] = processed
 
-            full_distribution_result = compute_nli_distribution(
-                analysis_frame,
-                target_column,
-                max_entities=None,
-                progress_callback=update_progress,
-                break_method=evaluation_mode,
-                strict_whitening=evaluation_mode == "strict",
-                max_p=max_p,
-                max_d=max_d,
-                max_q=max_q,
-                min_history=minimum_history,
+            if resume_full_dataset_analysis and matching_checkpoint is not None:
+                checkpoint_id = str(matching_checkpoint["id"])
+                checkpoint_payload = load_run_checkpoint(checkpoint_id)
+                distribution_rows = checkpoint_payload.get("distribution_rows", pd.DataFrame())
+                failure_rows = checkpoint_payload.get("failure_rows", pd.DataFrame())
+                processed_entities = int(checkpoint_payload.get("processed_entities", 0) or 0)
+                skipped_short_series = int(checkpoint_payload.get("skipped_short_series", 0) or 0)
+                next_index = int(checkpoint_payload.get("next_index", 0) or 0)
+                total_entities = int(
+                    checkpoint_payload.get("total_entities", int(analysis_frame["entity_id"].nunique()))
+                    or int(analysis_frame["entity_id"].nunique())
+                )
+                append_execution_log(
+                    f"Resuming interrupted analysis from checkpoint at {processed_entities}/{total_entities} firms."
+                )
+            else:
+                if matching_checkpoint is not None:
+                    delete_run_checkpoint(str(matching_checkpoint["id"]))
+                distribution_rows = pd.DataFrame(
+                    columns=["entity_id", "entity_label", "nli_score", "arima_order", "break_count", "break_method"]
+                )
+                failure_rows = pd.DataFrame(columns=["entity_id", "entity_label", "error"])
+                processed_entities = 0
+                skipped_short_series = 0
+                next_index = 0
+                total_entities = int(analysis_frame["entity_id"].nunique())
+                checkpoint_id = save_run_checkpoint(
+                    {
+                        "analysis_meta": analysis_meta,
+                        "distribution_rows": distribution_rows,
+                        "failure_rows": failure_rows,
+                        "processed_entities": processed_entities,
+                        "skipped_short_series": skipped_short_series,
+                        "next_index": next_index,
+                        "total_entities": total_entities,
+                    },
+                    job_type=FULL_DATASET_ANALYSIS_JOB_TYPE,
+                    status="running",
+                    label=checkpoint_label,
+                    run_key=checkpoint_run_key,
+                )
+                append_execution_log(
+                    f"Created resumable checkpoint for full cleaned dataset analysis. Batch size={FULL_DATASET_NLI_BATCH_SIZE}."
+                )
+
+            while next_index < total_entities:
+                chunk = compute_nli_distribution_chunk(
+                    analysis_frame,
+                    target_column,
+                    start_index=next_index,
+                    batch_size=FULL_DATASET_NLI_BATCH_SIZE,
+                    max_entities=None,
+                    progress_callback=update_progress,
+                    break_method=evaluation_mode,
+                    strict_whitening=evaluation_mode == "strict",
+                    max_p=max_p,
+                    max_d=max_d,
+                    max_q=max_q,
+                    min_history=minimum_history,
+                )
+                if not chunk.distribution.empty:
+                    distribution_rows = pd.concat([distribution_rows, chunk.distribution], ignore_index=True)
+                if not chunk.failures.empty:
+                    failure_rows = pd.concat([failure_rows, chunk.failures], ignore_index=True)
+                processed_entities += chunk.processed_entities
+                skipped_short_series += chunk.skipped_short_series
+                next_index = chunk.next_index
+                save_run_checkpoint(
+                    {
+                        "analysis_meta": analysis_meta,
+                        "distribution_rows": distribution_rows,
+                        "failure_rows": failure_rows,
+                        "processed_entities": processed_entities,
+                        "skipped_short_series": skipped_short_series,
+                        "next_index": next_index,
+                        "total_entities": total_entities,
+                    },
+                    job_type=FULL_DATASET_ANALYSIS_JOB_TYPE,
+                    status="running",
+                    label=checkpoint_label,
+                    run_key=checkpoint_run_key,
+                    checkpoint_id=checkpoint_id,
+                )
+                append_execution_log(f"Saved checkpoint at {next_index}/{total_entities} firms.")
+                if chunk.completed:
+                    break
+
+            full_distribution_result = build_nli_distribution_result(
+                distribution_rows,
+                failure_rows,
+                processed_entities=processed_entities,
+                skipped_short_series=skipped_short_series,
+                requested_entities=total_entities,
             )
             progress_bar.progress(1.0, text="Full-dataset NLI run complete.")
             update_step_status(
@@ -827,6 +971,22 @@ if run_analysis:
             }
             update_step_status("Save analysis result", "completed", "Full-dataset analysis saved.")
             append_execution_log("Saved full-dataset analysis results to session state.")
+            save_run_checkpoint(
+                {
+                    "analysis_meta": analysis_meta,
+                    "distribution_rows": distribution_rows,
+                    "failure_rows": failure_rows,
+                    "processed_entities": processed_entities,
+                    "skipped_short_series": skipped_short_series,
+                    "next_index": total_entities,
+                    "total_entities": total_entities,
+                },
+                job_type=FULL_DATASET_ANALYSIS_JOB_TYPE,
+                status="completed",
+                label=checkpoint_label,
+                run_key=checkpoint_run_key,
+                checkpoint_id=checkpoint_id,
+            )
             st.session_state["dashboard_view"] = "Dataset Summary"
 
         st.session_state["analysis_meta"] = analysis_meta
@@ -850,7 +1010,9 @@ if run_analysis:
         st.stop()
 
 if not has_matching_analysis:
-    if st.session_state.get("analysis_result") is not None:
+    if matching_checkpoint is not None and analysis_scope == FULL_CLEANED_DATASET_SCOPE:
+        st.info("An interrupted full cleaned dataset analysis checkpoint is available. Resume it to continue from the last saved batch.")
+    elif st.session_state.get("analysis_result") is not None:
         st.info("Selections changed. Click `Run Analysis` again to refresh the dashboard.")
     st.stop()
 

@@ -36,6 +36,17 @@ class NLIDistributionResult:
     failure_examples: pd.DataFrame
 
 
+@dataclass
+class NLIDistributionChunkResult:
+    distribution: pd.DataFrame
+    failures: pd.DataFrame
+    processed_entities: int
+    skipped_short_series: int
+    next_index: int
+    total_entities: int
+    completed: bool
+
+
 def _safe_scalar(value: Iterable[float] | float) -> float:
     array = np.asarray(value, dtype=float).reshape(-1)
     if array.size == 0:
@@ -120,6 +131,61 @@ def compute_nli_distribution(
     max_q: int = 2,
     min_history: int = 10,
 ) -> NLIDistributionResult:
+    rows: list[dict] = []
+    failures: list[dict] = []
+    processed_entities = 0
+    skipped_short_series = 0
+    start_index = 0
+    total_entities = frame["entity_id"].nunique()
+    if max_entities is not None:
+        total_entities = min(total_entities, max_entities)
+
+    while start_index < total_entities:
+        chunk = compute_nli_distribution_chunk(
+            frame,
+            target_column,
+            start_index=start_index,
+            batch_size=max(1, min(100, total_entities - start_index)),
+            max_entities=max_entities,
+            progress_callback=progress_callback,
+            break_method=break_method,
+            strict_whitening=strict_whitening,
+            max_p=max_p,
+            max_d=max_d,
+            max_q=max_q,
+            min_history=min_history,
+        )
+        rows.extend(chunk.distribution.to_dict("records"))
+        failures.extend(chunk.failures.to_dict("records"))
+        processed_entities += chunk.processed_entities
+        skipped_short_series += chunk.skipped_short_series
+        start_index = chunk.next_index
+        if chunk.completed:
+            break
+
+    return build_nli_distribution_result(
+        rows,
+        failures,
+        processed_entities=processed_entities,
+        skipped_short_series=skipped_short_series,
+        requested_entities=total_entities,
+    )
+
+
+def compute_nli_distribution_chunk(
+    frame: pd.DataFrame,
+    target_column: str,
+    start_index: int,
+    batch_size: int,
+    max_entities: int | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    break_method: str = "practical",
+    strict_whitening: bool = False,
+    max_p: int = 2,
+    max_d: int = 2,
+    max_q: int = 2,
+    min_history: int = 10,
+) -> NLIDistributionChunkResult:
     rows = []
     failures = []
     processed_entities = 0
@@ -128,13 +194,17 @@ def compute_nli_distribution(
     total_entities = frame["entity_id"].nunique()
     if max_entities is not None:
         total_entities = min(total_entities, max_entities)
+    start_index = max(0, int(start_index))
+    end_index = min(total_entities, start_index + max(1, int(batch_size)))
 
     for index, (entity_id, subset) in enumerate(grouped):
-        if max_entities is not None and index >= max_entities:
+        if index < start_index:
+            continue
+        if index >= end_index or (max_entities is not None and index >= max_entities):
             break
         processed_entities += 1
         if progress_callback is not None:
-            progress_callback(processed_entities, total_entities, subset["entity_label"].iloc[0])
+            progress_callback(start_index + processed_entities, total_entities, subset["entity_label"].iloc[0])
         series_frame = subset[["date", target_column]].rename(columns={target_column: "value"}).dropna()
         required_history = max(int(min_history), 10)
         if len(series_frame) < required_history:
@@ -169,18 +239,44 @@ def compute_nli_distribution(
             )
             continue
 
-    columns = ["entity_id", "entity_label", "nli_score", "arima_order", "break_count", "break_method"]
-    distribution = pd.DataFrame(rows, columns=columns)
+    next_index = end_index
+    return NLIDistributionChunkResult(
+        distribution=pd.DataFrame(
+            rows,
+            columns=["entity_id", "entity_label", "nli_score", "arima_order", "break_count", "break_method"],
+        ),
+        failures=pd.DataFrame(failures, columns=["entity_id", "entity_label", "error"]),
+        processed_entities=processed_entities,
+        skipped_short_series=skipped_short_series,
+        next_index=next_index,
+        total_entities=total_entities,
+        completed=next_index >= total_entities,
+    )
+
+
+def build_nli_distribution_result(
+    rows: list[dict] | pd.DataFrame,
+    failures: list[dict] | pd.DataFrame,
+    processed_entities: int,
+    skipped_short_series: int,
+    requested_entities: int,
+) -> NLIDistributionResult:
+    distribution = pd.DataFrame(rows)
     if not distribution.empty:
         distribution = distribution.sort_values("nli_score", ascending=False).reset_index(drop=True)
+    else:
+        distribution = pd.DataFrame(columns=["entity_id", "entity_label", "nli_score", "arima_order", "break_count", "break_method"])
 
-    failure_examples = pd.DataFrame(failures, columns=["entity_id", "entity_label", "error"]).head(10)
+    failure_frame = pd.DataFrame(failures)
+    if failure_frame.empty:
+        failure_frame = pd.DataFrame(columns=["entity_id", "entity_label", "error"])
+    failure_examples = failure_frame.head(10).reset_index(drop=True)
     return NLIDistributionResult(
         distribution=distribution,
-        requested_entities=processed_entities if max_entities is None else min(processed_entities, max_entities),
-        processed_entities=processed_entities,
+        requested_entities=int(requested_entities),
+        processed_entities=int(processed_entities),
         successful_entities=int(len(distribution)),
-        skipped_short_series=skipped_short_series,
-        failed_entities=int(len(failures)),
+        skipped_short_series=int(skipped_short_series),
+        failed_entities=int(len(failure_frame)),
         failure_examples=failure_examples,
     )
