@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 from io import StringIO
 import importlib
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any
+from typing import Any, get_args, get_origin
 from uuid import uuid4
 
 import numpy as np
@@ -37,6 +37,58 @@ def _ensure_db(db_path: Path) -> None:
         conn.commit()
 
 
+def _serialize_dataclass_value(value: Any) -> dict[str, Any]:
+    return {
+        field.name: _serialize_value(getattr(value, field.name))
+        for field in fields(value)
+    }
+
+
+def _resolve_annotation(annotation: Any, module_globals: dict[str, Any]) -> Any:
+    if not isinstance(annotation, str):
+        return annotation
+    cleaned = annotation.strip()
+    if cleaned in module_globals:
+        return module_globals[cleaned]
+    if "|" in cleaned:
+        candidates = [part.strip() for part in cleaned.split("|")]
+        for candidate in candidates:
+            if candidate == "None":
+                continue
+            if candidate in module_globals:
+                return module_globals[candidate]
+    return annotation
+
+
+def _coerce_dataclass_field(field_type: Any, value: Any) -> Any:
+    if value is None:
+        return None
+    origin = get_origin(field_type)
+    if origin is None:
+        if isinstance(field_type, type) and is_dataclass(field_type) and isinstance(value, dict):
+            return _rebuild_dataclass(field_type, value)
+        return value
+    for candidate in get_args(field_type):
+        if candidate is type(None):
+            continue
+        coerced = _coerce_dataclass_field(candidate, value)
+        if coerced is not value or (isinstance(candidate, type) and is_dataclass(candidate) and isinstance(value, dict)):
+            return coerced
+    return value
+
+
+def _rebuild_dataclass(cls: type, payload: dict[str, Any]) -> Any:
+    module_globals = vars(importlib.import_module(cls.__module__))
+    kwargs = {}
+    for field in fields(cls):
+        if field.name not in payload:
+            continue
+        annotation = cls.__annotations__.get(field.name, field.type)
+        resolved_type = _resolve_annotation(annotation, module_globals)
+        kwargs[field.name] = _coerce_dataclass_field(resolved_type, payload[field.name])
+    return cls(**kwargs)
+
+
 def _serialize_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -63,7 +115,7 @@ def _serialize_value(value: Any) -> Any:
             "__kind__": "dataclass",
             "module": value.__class__.__module__,
             "class": value.__class__.__name__,
-            "value": _serialize_value(asdict(value)),
+            "value": _serialize_dataclass_value(value),
         }
     return {"__kind__": "repr", "value": repr(value)}
 
@@ -91,7 +143,7 @@ def _deserialize_value(value: Any) -> Any:
             module = importlib.import_module(value["module"])
             cls = getattr(module, value["class"])
             payload = _deserialize_value(value["value"])
-            return cls(**payload)
+            return _rebuild_dataclass(cls, payload)
         return {key: _deserialize_value(item) for key, item in value.items()}
     return value
 

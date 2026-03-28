@@ -357,6 +357,7 @@ with st.sidebar:
     else:
         st.warning(f"Strict Bai-Perron mode unavailable: {strict_breaks_message}")
     with st.expander("History", expanded=False):
+        st.caption("Saved history is shared across app sessions on this deployment.")
         history_entries = list_history_entries()
         if history_entries.empty:
             st.caption("No saved history yet.")

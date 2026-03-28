@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
+from src.arima_pipeline import ARIMAFitResult
+from src.break_detection import BreakDetectionResult
 from src.history_store import delete_history_snapshot, list_history_entries, load_history_snapshot, save_history_snapshot
+from src.nli_pipeline import NLIResult
 from src.tournament_pipeline import ForecastTournamentResult
 from src.validation import RepeatRunCheckResult
 
@@ -104,6 +108,63 @@ def test_history_snapshot_roundtrip(tmp_path) -> None:
     assert list(loaded["tournament_result"].forecast_panel["model"]) == ["ARIMA", "ARIMA"]
     assert loaded["tournament_result"].firm_forecast_summary.loc[0, "holdout_points"] == 2
     assert loaded["tuple_value"] == (1, 2, 3)
+
+
+def test_history_snapshot_roundtrip_preserves_nested_dataclasses(tmp_path) -> None:
+    db_path = tmp_path / "history.sqlite3"
+    payload = {
+        "analysis_result": {
+            "analysis_scope": "Single entity diagnostics",
+            "nli_result": NLIResult(
+                break_result=BreakDetectionResult(
+                    break_indices=[3],
+                    break_dates=["2023-12-31"],
+                    segment_start=0,
+                    segment_end=6,
+                    segment=pd.DataFrame(
+                        {
+                            "date": pd.to_datetime(["2023-03-31", "2023-06-30"]),
+                            "value": [0.1, 0.2],
+                        }
+                    ),
+                    method="r-strucchange",
+                    message="ok",
+                ),
+                arima_result=ARIMAFitResult(
+                    order=(1, 1, 0),
+                    aicc=1.23,
+                    residuals=pd.Series([0.0, 0.1], name="residual"),
+                    fitted_values=pd.Series([0.1, 0.2], name="fitted"),
+                    candidate_table=pd.DataFrame([{"order": "(1, 1, 0)", "aicc": 1.23, "status": "ok"}]),
+                    intercept=0.0,
+                    ar_params=np.asarray([0.2]),
+                    ma_params=np.asarray([]),
+                ),
+                ljung_box=pd.DataFrame([{"lag": 1, "lb_stat": 0.1, "lb_pvalue": 0.9}]),
+                bds_statistic=0.1,
+                bds_pvalue=0.9,
+                tsay_f_stat=None,
+                tsay_pvalue=None,
+                nli_score=0.1,
+            )
+        }
+    }
+
+    snapshot_id = save_history_snapshot(
+        payload,
+        snapshot_type="analysis",
+        label="Nested dataclass snapshot",
+        analysis_meta={"analysis_scope": "Single entity diagnostics"},
+        db_path=db_path,
+    )
+
+    loaded = load_history_snapshot(snapshot_id, db_path)
+    loaded_nli = loaded["analysis_result"]["nli_result"]
+    assert isinstance(loaded_nli, NLIResult)
+    assert isinstance(loaded_nli.break_result, BreakDetectionResult)
+    assert isinstance(loaded_nli.arima_result, ARIMAFitResult)
+    assert loaded_nli.break_result.method == "r-strucchange"
+    assert loaded_nli.arima_result.order == (1, 1, 0)
 
 
 def test_history_snapshot_delete(tmp_path) -> None:
