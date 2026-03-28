@@ -488,12 +488,22 @@ if dataset_uploaded:
         max_d = st.slider("Max differencing order (d)", min_value=0, max_value=2, value=2)
         max_q = st.slider("Max MA order (q)", min_value=0, max_value=4, value=2)
         run_chronos = st.checkbox("Run Chronos", value=False)
-        chronos_deterministic = st.checkbox("Chronos deterministic inference", value=True, disabled=not run_chronos)
+        chronos_deterministic = st.checkbox(
+            "Chronos deterministic inference",
+            value=False,
+            disabled=not run_chronos,
+            help="Disable this to use sampled Chronos inference, which produces visible 50%, 80%, 90%, and 95% interval bands.",
+        )
+        if run_chronos and chronos_deterministic:
+            st.caption(
+                "Deterministic Chronos collapses the interval bands onto the forecast line. "
+                "Turn this off to see highlighted uncertainty regions."
+            )
         chronos_seed = int(
             st.number_input("Chronos seed", min_value=0, max_value=999999, value=17, step=1, disabled=not run_chronos)
         )
         chronos_samples = int(
-            st.slider("Chronos samples", min_value=5, max_value=100, value=20, step=5, disabled=not run_chronos or chronos_deterministic)
+            st.slider("Chronos samples", min_value=5, max_value=100, value=50, step=5, disabled=not run_chronos or chronos_deterministic)
         )
 
     with st.expander("Audit Controls", expanded=False):
