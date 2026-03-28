@@ -675,7 +675,7 @@ if dataset_uploaded:
             f"Full cleaned dataset analysis checkpoints every `{FULL_DATASET_NLI_BATCH_SIZE}` firms so interrupted runs can resume."
         )
 
-    run_analysis = st.button("Run Analysis", type="primary")
+    run_analysis = st.button("Run Analysis", type="primary") or resume_full_dataset_analysis
     cached_analysis_meta = st.session_state.get("analysis_meta")
     has_matching_analysis = (
         (cached_analysis_meta == analysis_meta and st.session_state.get("analysis_result") is not None)
