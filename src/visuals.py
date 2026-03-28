@@ -6,6 +6,13 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 
+INTERVAL_COLUMN_MAP = {
+    "50%": ("q25", "q75"),
+    "80%": ("q10", "q90"),
+    "95%": ("q025", "q975"),
+}
+
+
 def build_forecast_figure(
     actual_series: pd.DataFrame,
     forecast_frame: pd.DataFrame,
@@ -49,6 +56,58 @@ def build_forecast_figure(
                     line={"width": 0},
                 )
             )
+
+    figure.update_layout(title=title, xaxis_title="Date", yaxis_title="Value")
+    return figure
+
+
+def build_interval_forecast_figure(
+    actual_series: pd.DataFrame,
+    forecast_frame: pd.DataFrame,
+    title: str,
+    interval_label: str,
+) -> go.Figure:
+    lower_column, upper_column = INTERVAL_COLUMN_MAP[interval_label]
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=actual_series["date"],
+            y=actual_series["value"],
+            mode="lines+markers",
+            name="Actual",
+            line={"width": 3},
+        )
+    )
+    if not forecast_frame.empty:
+        model_name = str(forecast_frame["model"].iloc[0])
+        figure.add_trace(
+            go.Scatter(
+                x=forecast_frame["date"],
+                y=forecast_frame[upper_column],
+                mode="lines",
+                line={"width": 0},
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=forecast_frame["date"],
+                y=forecast_frame[lower_column],
+                mode="lines",
+                fill="tonexty",
+                name=f"{interval_label} interval",
+                line={"width": 0},
+            )
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=forecast_frame["date"],
+                y=forecast_frame["forecast"],
+                mode="lines+markers",
+                name=f"{model_name} median forecast",
+            )
+        )
 
     figure.update_layout(title=title, xaxis_title="Date", yaxis_title="Value")
     return figure

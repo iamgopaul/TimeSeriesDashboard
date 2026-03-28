@@ -17,6 +17,19 @@ def test_history_snapshot_roundtrip(tmp_path) -> None:
                     "value": [0.1, 0.2],
                 }
             ),
+            "chronos_predictions": pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-03-31", "2024-06-30"]),
+                    "forecast": [0.15, 0.25],
+                    "q025": [0.05, 0.1],
+                    "q10": [0.08, 0.12],
+                    "q25": [0.1, 0.15],
+                    "q50": [0.15, 0.25],
+                    "q75": [0.2, 0.3],
+                    "q90": [0.22, 0.32],
+                    "q975": [0.25, 0.35],
+                }
+            ),
         },
         "validation_result": {
             "naive_repeat": RepeatRunCheckResult(
@@ -50,6 +63,8 @@ def test_history_snapshot_roundtrip(tmp_path) -> None:
 
     loaded = load_history_snapshot(snapshot_id, db_path)
     assert list(loaded["analysis_result"]["entity_series"]["value"]) == [0.1, 0.2]
+    assert "q025" in loaded["analysis_result"]["chronos_predictions"].columns
+    assert "q975" in loaded["analysis_result"]["chronos_predictions"].columns
     assert loaded["validation_result"]["naive_repeat"].status == "exact_match"
     assert loaded["tuple_value"] == (1, 2, 3)
 

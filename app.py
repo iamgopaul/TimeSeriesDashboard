@@ -42,6 +42,7 @@ from src.visuals import (
     build_error_gap_figure,
     build_eligibility_figure,
     build_forecast_figure,
+    build_interval_forecast_figure,
     build_nli_distribution_figure,
     build_nli_quartile_figure,
     build_residual_autocorrelation_figure,
@@ -368,8 +369,19 @@ with overview_right:
     evaluation_mode_label = st.selectbox(
         "Evaluation mode",
         ["Strict deterministic", "Practical fallback"],
+        help="Choose whether the dashboard should enforce strict audit gates or continue with practical fallbacks.",
     )
     evaluation_mode = "strict" if evaluation_mode_label == "Strict deterministic" else "practical"
+    if evaluation_mode == "strict":
+        st.caption(
+            "`Strict deterministic`: uses strict Bai-Perron break detection, enforces the Ljung-Box residual whitening gate, "
+            "and avoids fallback forecasts when the selected model fails."
+        )
+    else:
+        st.caption(
+            "`Practical fallback`: uses the more forgiving pipeline, allows fallback behavior when ARIMA windows fail, "
+            "and is better for exploratory analysis when you still want results."
+        )
     if evaluation_mode == "strict" and not strict_breaks_available:
         st.caption("Strict mode requires R `strucchange`, which is currently unavailable.")
     holdout_policy = st.selectbox(
@@ -852,6 +864,19 @@ if view == "Forecasts":
             st.warning("Chronos quantile order check failed.")
         if not bool(chronos_forecast.metrics["interval_width_nonnegative"].iloc[0]):
             st.warning("Chronos interval width check failed.")
+        has_extended_intervals = {"q025", "q25", "q75", "q975"}.issubset(chronos_forecast.predictions.columns)
+        intervals_collapsed = (
+            bool(chronos_forecast.metrics["intervals_collapsed"].iloc[0])
+            if "intervals_collapsed" in chronos_forecast.metrics.columns
+            else bool(
+                has_extended_intervals
+                and (
+                    (chronos_forecast.predictions["q025"] == chronos_forecast.predictions["q975"])
+                    & (chronos_forecast.predictions["q25"] == chronos_forecast.predictions["q75"])
+                    & (chronos_forecast.predictions["q10"] == chronos_forecast.predictions["q90"])
+                ).all()
+            )
+        )
         st.plotly_chart(
             build_forecast_figure(
                 result_entity_series,
@@ -860,6 +885,43 @@ if view == "Forecasts":
             ),
             use_container_width=True,
         )
+        if not has_extended_intervals:
+            st.info("This saved Chronos result only contains the original 80% interval fields, so the new 50% and 95% charts are unavailable.")
+        elif intervals_collapsed:
+            st.info(
+                "Chronos is running in deterministic mode, so the 50%, 80%, and 95% intervals collapse to the point forecast. "
+                "Switch to sampled inference to see visible uncertainty bands."
+            )
+        else:
+            st.subheader("Chronos Prediction Intervals")
+            interval_left, interval_right = st.columns(2)
+            interval_left.plotly_chart(
+                build_interval_forecast_figure(
+                    result_entity_series,
+                    chronos_forecast.predictions,
+                    f"Chronos 50% Interval: {active_entity_label}",
+                    "50%",
+                ),
+                use_container_width=True,
+            )
+            interval_right.plotly_chart(
+                build_interval_forecast_figure(
+                    result_entity_series,
+                    chronos_forecast.predictions,
+                    f"Chronos 80% Interval: {active_entity_label}",
+                    "80%",
+                ),
+                use_container_width=True,
+            )
+            st.plotly_chart(
+                build_interval_forecast_figure(
+                    result_entity_series,
+                    chronos_forecast.predictions,
+                    f"Chronos 95% Interval: {active_entity_label}",
+                    "95%",
+                ),
+                use_container_width=True,
+            )
         metric_frames.append(chronos_forecast.metrics)
         comparison = build_model_gap(arima_forecast.predictions, chronos_forecast.predictions)
         if not comparison.empty:

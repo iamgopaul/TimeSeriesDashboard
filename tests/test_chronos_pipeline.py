@@ -43,8 +43,45 @@ def test_chronos_deterministic_mode_collapses_quantiles(monkeypatch):
     result = expanding_window_forecast(frame, holdout_size=2, deterministic=True, seed=99)
 
     assert result.available
+    assert (result.predictions["q025"] == result.predictions["q50"]).all()
     assert (result.predictions["q10"] == result.predictions["q50"]).all()
+    assert (result.predictions["q25"] == result.predictions["q50"]).all()
     assert (result.predictions["q50"] == result.predictions["q90"]).all()
+    assert (result.predictions["q75"] == result.predictions["q50"]).all()
+    assert (result.predictions["q975"] == result.predictions["q50"]).all()
     assert (result.predictions["sample_count"] == 1).all()
     assert bool(result.metrics["quantile_order_valid"].iloc[0])
     assert bool(result.metrics["interval_width_nonnegative"].iloc[0])
+    assert bool(result.metrics["intervals_collapsed"].iloc[0])
+
+
+def test_chronos_sampled_mode_emits_nested_intervals(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2020-03-31", periods=6, freq="QE-DEC"),
+            "value": np.linspace(1.0, 1.5, 6),
+        }
+    )
+
+    class FakePipeline:
+        def predict(self, context, prediction_length, num_samples):
+            assert prediction_length == 1
+            assert num_samples == 5
+            return np.asarray([[1.0, 2.0, 3.0, 4.0, 5.0]])
+
+    monkeypatch.setattr("src.chronos_pipeline.chronos_import_status", lambda: (True, "ok"))
+    monkeypatch.setattr("src.chronos_pipeline.load_chronos_pipeline", lambda model_name: (FakePipeline(), model_name, "loaded"))
+
+    result = expanding_window_forecast(frame, holdout_size=2, deterministic=False, seed=99, num_samples=5)
+
+    assert result.available
+    assert {"q025", "q10", "q25", "q50", "q75", "q90", "q975"}.issubset(result.predictions.columns)
+    assert (result.predictions["q025"] <= result.predictions["q10"]).all()
+    assert (result.predictions["q10"] <= result.predictions["q25"]).all()
+    assert (result.predictions["q25"] <= result.predictions["q50"]).all()
+    assert (result.predictions["q50"] <= result.predictions["q75"]).all()
+    assert (result.predictions["q75"] <= result.predictions["q90"]).all()
+    assert (result.predictions["q90"] <= result.predictions["q975"]).all()
+    assert (result.predictions["interval_width_50"] <= result.predictions["interval_width"]).all()
+    assert (result.predictions["interval_width"] <= result.predictions["interval_width_95"]).all()
+    assert not bool(result.metrics["intervals_collapsed"].iloc[0])

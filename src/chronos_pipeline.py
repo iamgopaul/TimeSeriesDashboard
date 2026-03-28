@@ -122,18 +122,39 @@ def expanding_window_forecast(
         )
         samples = np.asarray(forecast_samples[0], dtype=float).reshape(-1)
         if deterministic:
-            quantiles = np.asarray([samples[0], samples[0], samples[0]], dtype=float)
+            quantiles = {
+                "q025": float(samples[0]),
+                "q10": float(samples[0]),
+                "q25": float(samples[0]),
+                "q50": float(samples[0]),
+                "q75": float(samples[0]),
+                "q90": float(samples[0]),
+                "q975": float(samples[0]),
+            }
         else:
-            quantiles = np.quantile(samples, [0.1, 0.5, 0.9], axis=0).reshape(-1)
+            quantile_values = np.quantile(samples, [0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975], axis=0).reshape(-1)
+            quantiles = {
+                "q025": float(quantile_values[0]),
+                "q10": float(quantile_values[1]),
+                "q25": float(quantile_values[2]),
+                "q50": float(quantile_values[3]),
+                "q75": float(quantile_values[4]),
+                "q90": float(quantile_values[5]),
+                "q975": float(quantile_values[6]),
+            }
         predictions.append(
             {
                 "date": date,
                 "actual": actual,
-                "forecast": float(quantiles[1]),
-                "q10": float(quantiles[0]),
-                "q50": float(quantiles[1]),
-                "q90": float(quantiles[2]),
-                "error": float(quantiles[1] - actual),
+                "forecast": quantiles["q50"],
+                "q025": quantiles["q025"],
+                "q10": quantiles["q10"],
+                "q25": quantiles["q25"],
+                "q50": quantiles["q50"],
+                "q75": quantiles["q75"],
+                "q90": quantiles["q90"],
+                "q975": quantiles["q975"],
+                "error": float(quantiles["q50"] - actual),
                 "model": "Chronos",
                 "model_used": resolved_model_name,
                 "inference_mode": "deterministic" if deterministic else "sampled",
@@ -143,15 +164,45 @@ def expanding_window_forecast(
         )
 
     prediction_frame = pd.DataFrame(predictions)
+    prediction_frame["inside_interval_50"] = (
+        (prediction_frame["actual"] >= prediction_frame["q25"])
+        & (prediction_frame["actual"] <= prediction_frame["q75"])
+    )
     prediction_frame["inside_interval"] = (
         (prediction_frame["actual"] >= prediction_frame["q10"])
         & (prediction_frame["actual"] <= prediction_frame["q90"])
     )
-    prediction_frame["interval_width"] = prediction_frame["q90"] - prediction_frame["q10"]
-    quantile_order_valid = bool(
-        ((prediction_frame["q10"] <= prediction_frame["q50"]) & (prediction_frame["q50"] <= prediction_frame["q90"])).all()
+    prediction_frame["inside_interval_95"] = (
+        (prediction_frame["actual"] >= prediction_frame["q025"])
+        & (prediction_frame["actual"] <= prediction_frame["q975"])
     )
-    nonnegative_interval_width = bool((prediction_frame["interval_width"] >= 0).all())
+    prediction_frame["interval_width_50"] = prediction_frame["q75"] - prediction_frame["q25"]
+    prediction_frame["interval_width"] = prediction_frame["q90"] - prediction_frame["q10"]
+    prediction_frame["interval_width_95"] = prediction_frame["q975"] - prediction_frame["q025"]
+    quantile_order_valid = bool(
+        (
+            (prediction_frame["q025"] <= prediction_frame["q10"])
+            & (prediction_frame["q10"] <= prediction_frame["q25"])
+            & (prediction_frame["q25"] <= prediction_frame["q50"])
+            & (prediction_frame["q50"] <= prediction_frame["q75"])
+            & (prediction_frame["q75"] <= prediction_frame["q90"])
+            & (prediction_frame["q90"] <= prediction_frame["q975"])
+        ).all()
+    )
+    nonnegative_interval_width = bool(
+        (
+            (prediction_frame["interval_width_50"] >= 0)
+            & (prediction_frame["interval_width"] >= 0)
+            & (prediction_frame["interval_width_95"] >= 0)
+        ).all()
+    )
+    intervals_collapsed = bool(
+        (
+            (prediction_frame["interval_width_50"] == 0)
+            & (prediction_frame["interval_width"] == 0)
+            & (prediction_frame["interval_width_95"] == 0)
+        ).all()
+    )
     insample = working.loc[: split_index - 1, "value"].to_numpy(dtype=float)
     metric_frame = pd.DataFrame(
         [
@@ -170,12 +221,15 @@ def expanding_window_forecast(
                     prediction_frame["actual"].to_numpy(),
                     prediction_frame["forecast"].to_numpy(),
                 ),
-                "median_interval_width": float(
-                    np.median(prediction_frame["q90"] - prediction_frame["q10"])
-                ),
+                "median_interval_width_50": float(np.median(prediction_frame["interval_width_50"])),
+                "median_interval_width": float(np.median(prediction_frame["interval_width"])),
+                "median_interval_width_95": float(np.median(prediction_frame["interval_width_95"])),
+                "interval_coverage_rate_50": float(prediction_frame["inside_interval_50"].mean()),
                 "interval_coverage_rate": float(prediction_frame["inside_interval"].mean()),
+                "interval_coverage_rate_95": float(prediction_frame["inside_interval_95"].mean()),
                 "quantile_order_valid": quantile_order_valid,
                 "interval_width_nonnegative": nonnegative_interval_width,
+                "intervals_collapsed": intervals_collapsed,
                 "model_used": resolved_model_name,
                 "inference_mode": "deterministic" if deterministic else "sampled",
                 "seed": int(seed),
