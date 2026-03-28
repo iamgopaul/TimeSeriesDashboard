@@ -69,6 +69,7 @@ The dashboard stores saved snapshots locally so you can reopen past work without
 ## Notes
 
 - `Chronos` is optional. If the dependency is unavailable locally, the dashboard still runs the rest of the pipeline and reports the missing dependency in the sidebar.
+- Chronos now downloads models from Hugging Face by default when they are not already cached. Set `CHRONOS_OFFLINE=1` if you want cache-only loading.
 - Strict break-detection mode requires local `R` plus the `strucchange` package.
 - Streamlit deployments need the system packages listed in `packages.txt` so `Rscript` and `strucchange` are available for strict Bai-Perron mode.
 - `ARIMA` results may differ from Gretl because of search ranges, convergence behavior, and missing-value handling. Those differences are intentional and documented in the UI exports.

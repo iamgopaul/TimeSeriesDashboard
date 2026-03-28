@@ -1,26 +1,34 @@
 import numpy as np
 import pandas as pd
 
-from src.chronos_pipeline import expanding_window_forecast, load_chronos_pipeline
+from src.chronos_pipeline import chronos_offline_mode_enabled, expanding_window_forecast, load_chronos_pipeline
 
 
 def test_load_chronos_pipeline_falls_back(monkeypatch):
     calls = []
 
-    def fake_get_pipeline(model_name):
-        calls.append(model_name)
+    def fake_get_pipeline(model_name, local_files_only=False):
+        calls.append((model_name, local_files_only))
         if model_name == "amazon/chronos-bolt-base":
             raise TypeError("input_patch_size")
         return object()
 
     monkeypatch.setattr("src.chronos_pipeline.get_chronos_pipeline", fake_get_pipeline)
+    monkeypatch.delenv("CHRONOS_OFFLINE", raising=False)
 
     pipeline, resolved_model, message = load_chronos_pipeline("amazon/chronos-bolt-base")
 
     assert pipeline is not None
     assert resolved_model == "amazon/chronos-t5-base"
     assert "using `amazon/chronos-t5-base` instead" in message
-    assert calls == ["amazon/chronos-bolt-base", "amazon/chronos-t5-base"]
+    assert calls == [("amazon/chronos-bolt-base", False), ("amazon/chronos-t5-base", False)]
+
+
+def test_chronos_offline_mode_env_flag(monkeypatch):
+    monkeypatch.setenv("CHRONOS_OFFLINE", "1")
+    assert chronos_offline_mode_enabled()
+    monkeypatch.setenv("CHRONOS_OFFLINE", "false")
+    assert not chronos_offline_mode_enabled()
 
 
 def test_chronos_deterministic_mode_collapses_quantiles(monkeypatch):

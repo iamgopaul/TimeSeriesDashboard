@@ -28,28 +28,36 @@ def chronos_import_status() -> tuple[bool, str]:
         return False, str(exc)
 
 
+def chronos_offline_mode_enabled() -> bool:
+    value = os.environ.get("CHRONOS_OFFLINE", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 @lru_cache(maxsize=1)
-def get_chronos_pipeline(model_name: str):
+def get_chronos_pipeline(model_name: str, local_files_only: bool = False):
     import torch  # pragma: no cover - expensive external dependency
     from chronos import ChronosPipeline  # pragma: no cover - expensive external dependency
 
-    # Force offline loading so proxy-blocked environments fail fast using only
-    # locally cached model files.
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    if local_files_only:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    else:
+        os.environ.pop("HF_HUB_OFFLINE", None)
+        os.environ.pop("TRANSFORMERS_OFFLINE", None)
     dtype = torch.float32
     return ChronosPipeline.from_pretrained(
         model_name,
         device_map="cpu",
         dtype=dtype,
-        local_files_only=True,
+        local_files_only=local_files_only,
     )
 
 
 def load_chronos_pipeline(
     preferred_model: str = "amazon/chronos-bolt-base",
 ) -> tuple[object | None, str | None, str]:
+    local_files_only = chronos_offline_mode_enabled()
     candidates = [preferred_model]
     if preferred_model != "amazon/chronos-t5-base":
         candidates.append("amazon/chronos-t5-base")
@@ -57,17 +65,30 @@ def load_chronos_pipeline(
     errors: list[str] = []
     for candidate in candidates:
         try:
-            pipeline = get_chronos_pipeline(candidate)
+            pipeline = get_chronos_pipeline(candidate, local_files_only=local_files_only)
             message = (
-                "Chronos forecast completed."
+                (
+                    "Chronos forecast completed using locally cached model files."
+                    if local_files_only
+                    else "Chronos forecast completed."
+                )
                 if candidate == preferred_model
-                else f"Primary model `{preferred_model}` was unavailable; using `{candidate}` instead."
+                else (
+                    f"Primary model `{preferred_model}` was unavailable; using `{candidate}` instead."
+                )
             )
             return pipeline, candidate, message
         except Exception as exc:  # pragma: no cover - depends on local environment
             errors.append(f"{candidate}: {exc}")
 
-    return None, None, "Chronos models failed to load. " + " | ".join(errors)
+    if local_files_only:
+        prefix = (
+            "Chronos models failed to load from local cache. "
+            "Unset `CHRONOS_OFFLINE` to allow Hugging Face downloads, or pre-cache the model files. "
+        )
+    else:
+        prefix = "Chronos models failed to load. "
+    return None, None, prefix + " | ".join(errors)
 
 
 def expanding_window_forecast(
