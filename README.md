@@ -13,7 +13,7 @@ The dashboard focuses on four goals:
 3. Diagnose non-linearity and structural breaks before interpreting results.
 4. Preserve prior runs so analysis can be reloaded without recomputation.
 
-In practice, that means the app lets you upload a WRDS-style dataset, map columns, inspect continuity and exclusions, run single-firm diagnostics, run full cleaned-dataset summaries, compute cross-firm forecast tournaments, and revisit saved historical snapshots later.
+In practice, that means the app lets you upload a WRDS-style dataset, map columns, inspect continuity and exclusions, run single-firm diagnostics, run `Full Cleaned Dataset` analysis, open `Full Cleaned Forecast Analysis` for cross-firm forecasting, and revisit saved historical snapshots later.
 
 ## Core Capabilities
 
@@ -40,7 +40,9 @@ In practice, that means the app lets you upload a WRDS-style dataset, map column
 
 - Summarize the cleaned panel across all eligible firms.
 - Compute full-dataset `NLI` distributions and quartile views.
-- Run multi-firm forecast tournaments across a configurable number of firms.
+- Checkpoint long-running `Full Cleaned Dataset` NLI runs in resumable batches.
+- Resume interrupted full cleaned-dataset analysis runs from the last saved batch instead of restarting from firm 1.
+- Run `Full Cleaned Forecast Analysis` across a configurable number of firms.
 - Compare `Naive`, `ARIMA`, and optional `Chronos` across firms using aggregate metrics and model win rates.
 - Inspect full-dataset forecast views, including panel-level actual-vs-predicted aggregates, error distributions, calibration-style comparisons, and per-firm drilldowns from the saved multi-firm run.
 
@@ -68,7 +70,7 @@ The dashboard follows a transparent workflow rather than a single black-box fore
 4. Choose a holdout strategy and evaluation mode.
 5. Run either:
    - single-entity diagnostics, or
-   - full cleaned-dataset summary and optional tournament views.
+   - `Full Cleaned Dataset` analysis and optional `Full Cleaned Forecast Analysis` views.
 6. Review model performance, residual diagnostics, `NLI`, structural breaks, and interval charts.
 7. Save the result to history for later inspection.
 
@@ -189,6 +191,7 @@ The dashboard stores saved snapshots locally so prior work can be reopened witho
 ### Storage
 
 - History database path: `.dashboard_history/history.sqlite3`
+- Full cleaned-dataset checkpoint path: `.dashboard_history/checkpoints.sqlite3`
 
 ### What gets saved
 
@@ -208,6 +211,13 @@ The dashboard stores saved snapshots locally so prior work can be reopened witho
 - On a deployed shared app instance, the history list is shared across sessions using the same app storage.
 - If the hosting platform wipes local disk during rebuilds or restarts, history may be lost unless you move storage to an external persistent database.
 
+### Resumable full cleaned-dataset analysis
+
+- Long `Full Cleaned Dataset` NLI runs checkpoint every `25` firms.
+- If the app reruns or the browser session drops, upload the same CSV, keep the same mapping/settings, and click `Resume Interrupted Analysis`.
+- If you intentionally want to restart from scratch, use `Discard Interrupted Analysis`.
+- Checkpoints are matched using the uploaded dataset bytes, schema mapping, and analysis settings so resume only appears for the same run definition.
+
 ## Deployment Notes
 
 ### Streamlit deployment
@@ -224,7 +234,10 @@ When deploying, make sure the platform installs:
 
 ### History persistence
 
-The current history backend uses a local SQLite file. This is suitable for local use and some simple hosted environments, but not all platforms guarantee persistent local storage between restarts.
+The current history backend uses local SQLite files. This is suitable for local use and some simple hosted environments, but not all platforms guarantee persistent local storage between restarts.
+
+- Saved history snapshots use `.dashboard_history/history.sqlite3`
+- Resumable full cleaned-dataset checkpoints use `.dashboard_history/checkpoints.sqlite3`
 
 ## Device And Layout Behavior
 
@@ -259,6 +272,7 @@ Depending on the current view and saved state, the dashboard can export:
 - `src/tournament_pipeline.py`: multi-firm forecasting tournament logic
 - `src/visuals.py`: Plotly figure builders
 - `src/history_store.py`: SQLite-backed history persistence
+- `src/checkpoint_store.py`: SQLite-backed resumable checkpoint persistence for long full-dataset runs
 - `run.sh`: local startup helper
 - `packages.txt`: deployment-time system packages for strict `R` support
 
@@ -294,6 +308,23 @@ What to check:
 
 Older snapshots may not contain newer forecast interval fields or newer tournament outputs. The app attempts to load these snapshots defensively, but some newly added visualizations may only appear for snapshots created after the latest feature updates.
 
+### Full cleaned-dataset analysis stopped before finishing
+
+Typical causes:
+
+- Streamlit reran the app while the long run was in progress
+- the browser tab slept or disconnected
+- the hosting environment restarted the session
+
+What to do:
+
+- reopen the same app deployment
+- upload the same CSV again
+- keep the same schema mapping and full-dataset settings
+- click `Resume Interrupted Analysis`
+
+If the resume prompt does not appear, the dataset bytes, mapping, or analysis settings changed from the interrupted run.
+
 ### `ARIMA` results differ from Gretl
 
 This can happen because of:
@@ -313,5 +344,6 @@ For the most informative workflow:
 1. Start with a single-entity diagnostic run to understand the target and the holdout behavior.
 2. Review `NLI`, residual checks, and `ARIMA` candidate search before over-interpreting forecast accuracy.
 3. Enable Chronos when you want model comparison and interval views.
-4. Use `Tournament Summary` for cross-firm comparison and full-dataset forecast views.
-5. Save important runs to history so you can reload them without recomputation.
+4. Use `Full Cleaned Dataset` for panel-wide diagnostics and resumable full-dataset NLI analysis.
+5. Use `Full Cleaned Forecast Analysis` for cross-firm forecast comparison and full-dataset forecast views.
+6. Save important runs to history so you can reload them without recomputation.
