@@ -33,6 +33,93 @@ def chronos_offline_mode_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _call_pipeline_predict(
+    pipeline,
+    context_tensor,
+    prediction_length: int,
+    deterministic: bool,
+    num_samples: int,
+):
+    requested_samples = 1 if deterministic else int(num_samples)
+    try:
+        return pipeline.predict(
+            context=context_tensor,
+            prediction_length=prediction_length,
+            num_samples=requested_samples,
+        )
+    except TypeError as exc:
+        message = str(exc)
+        if "unexpected keyword argument 'context'" not in message and "unexpected keyword argument 'num_samples'" not in message:
+            raise
+    try:
+        return pipeline.predict(
+            context_tensor,
+            prediction_length=prediction_length,
+            num_samples=requested_samples,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument 'num_samples'" not in str(exc):
+            raise
+    return pipeline.predict(
+        context_tensor,
+        prediction_length=prediction_length,
+    )
+
+
+def _extract_quantiles(
+    forecast_output,
+    deterministic: bool,
+    requested_samples: int,
+    model_name: str | None,
+) -> tuple[dict[str, float], str]:
+    batch = np.asarray(forecast_output[0], dtype=float)
+    flattened = batch.reshape(-1)
+    model_name = (model_name or "").lower()
+
+    # Chronos-Bolt returns direct quantiles, typically 0.1..0.9, rather than samples.
+    if "bolt" in model_name and flattened.size >= 9:
+        source_levels = np.linspace(0.1, 0.9, flattened.size)
+        targets = np.asarray([0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975], dtype=float)
+        interpolated = np.interp(targets, source_levels, flattened, left=flattened[0], right=flattened[-1])
+        quantiles = {
+            "q025": float(interpolated[0]),
+            "q10": float(interpolated[1]),
+            "q25": float(interpolated[2]),
+            "q50": float(interpolated[3]),
+            "q75": float(interpolated[4]),
+            "q90": float(interpolated[5]),
+            "q975": float(interpolated[6]),
+        }
+        return quantiles, "direct_quantiles"
+
+    if deterministic:
+        quantiles = {
+            "q025": float(flattened[0]),
+            "q10": float(flattened[0]),
+            "q25": float(flattened[0]),
+            "q50": float(flattened[0]),
+            "q75": float(flattened[0]),
+            "q90": float(flattened[0]),
+            "q975": float(flattened[0]),
+        }
+        return quantiles, "deterministic_sample"
+
+    samples = flattened
+    if samples.size == 0:
+        raise ValueError("Chronos returned no forecast samples.")
+    quantile_values = np.quantile(samples, [0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975], axis=0).reshape(-1)
+    quantiles = {
+        "q025": float(quantile_values[0]),
+        "q10": float(quantile_values[1]),
+        "q25": float(quantile_values[2]),
+        "q50": float(quantile_values[3]),
+        "q75": float(quantile_values[4]),
+        "q90": float(quantile_values[5]),
+        "q975": float(quantile_values[6]),
+    }
+    return quantiles, f"sampled_{int(requested_samples)}"
+
+
 @lru_cache(maxsize=1)
 def get_chronos_pipeline(model_name: str, local_files_only: bool = False):
     import torch  # pragma: no cover - expensive external dependency
@@ -136,33 +223,19 @@ def expanding_window_forecast(
         date = working.loc[idx, "date"]
         torch.manual_seed(int(seed))
         np.random.seed(int(seed))
-        forecast_samples = pipeline.predict(
-            context=torch.tensor(context),
+        forecast_output = _call_pipeline_predict(
+            pipeline,
+            context_tensor=torch.tensor(context),
             prediction_length=1,
-            num_samples=1 if deterministic else num_samples,
+            deterministic=deterministic,
+            num_samples=num_samples,
         )
-        samples = np.asarray(forecast_samples[0], dtype=float).reshape(-1)
-        if deterministic:
-            quantiles = {
-                "q025": float(samples[0]),
-                "q10": float(samples[0]),
-                "q25": float(samples[0]),
-                "q50": float(samples[0]),
-                "q75": float(samples[0]),
-                "q90": float(samples[0]),
-                "q975": float(samples[0]),
-            }
-        else:
-            quantile_values = np.quantile(samples, [0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975], axis=0).reshape(-1)
-            quantiles = {
-                "q025": float(quantile_values[0]),
-                "q10": float(quantile_values[1]),
-                "q25": float(quantile_values[2]),
-                "q50": float(quantile_values[3]),
-                "q75": float(quantile_values[4]),
-                "q90": float(quantile_values[5]),
-                "q975": float(quantile_values[6]),
-            }
+        quantiles, quantile_source = _extract_quantiles(
+            forecast_output,
+            deterministic=deterministic,
+            requested_samples=num_samples,
+            model_name=resolved_model_name,
+        )
         predictions.append(
             {
                 "date": date,
@@ -181,6 +254,7 @@ def expanding_window_forecast(
                 "inference_mode": "deterministic" if deterministic else "sampled",
                 "seed": int(seed),
                 "sample_count": 1 if deterministic else int(num_samples),
+                "quantile_source": quantile_source,
             }
         )
 

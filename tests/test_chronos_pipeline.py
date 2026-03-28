@@ -93,3 +93,34 @@ def test_chronos_sampled_mode_emits_nested_intervals(monkeypatch):
     assert (result.predictions["interval_width_50"] <= result.predictions["interval_width"]).all()
     assert (result.predictions["interval_width"] <= result.predictions["interval_width_95"]).all()
     assert not bool(result.metrics["intervals_collapsed"].iloc[0])
+
+
+def test_chronos_handles_positional_predict_and_direct_quantiles(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2020-03-31", periods=6, freq="QE-DEC"),
+            "value": np.linspace(1.0, 1.5, 6),
+        }
+    )
+
+    class FakeBoltPipeline:
+        def predict(self, *args, **kwargs):
+            if "context" in kwargs:
+                raise TypeError("ChronosPipeline.predict() got an unexpected keyword argument 'context'")
+            if "num_samples" in kwargs:
+                raise TypeError("ChronosBoltPipeline.predict() got an unexpected keyword argument 'num_samples'")
+            assert len(args) == 1
+            return np.asarray([[[1.0], [1.2], [1.4], [1.6], [1.8], [2.0], [2.2], [2.4], [2.6]]])
+
+    monkeypatch.setattr("src.chronos_pipeline.chronos_import_status", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        "src.chronos_pipeline.load_chronos_pipeline",
+        lambda model_name: (FakeBoltPipeline(), "amazon/chronos-bolt-base", "loaded"),
+    )
+
+    result = expanding_window_forecast(frame, holdout_size=2, deterministic=False, seed=99, num_samples=5)
+
+    assert result.available
+    assert (result.predictions["quantile_source"] == "direct_quantiles").all()
+    assert (result.predictions["q10"] <= result.predictions["q50"]).all()
+    assert (result.predictions["q50"] <= result.predictions["q90"]).all()
