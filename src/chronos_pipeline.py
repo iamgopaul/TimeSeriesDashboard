@@ -79,27 +79,31 @@ def _extract_quantiles(
     # Chronos-Bolt returns direct quantiles, typically 0.1..0.9, rather than samples.
     if "bolt" in model_name and flattened.size >= 9:
         source_levels = np.linspace(0.1, 0.9, flattened.size)
-        targets = np.asarray([0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975], dtype=float)
+        targets = np.asarray([0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.975], dtype=float)
         interpolated = np.interp(targets, source_levels, flattened, left=flattened[0], right=flattened[-1])
         quantiles = {
             "q025": float(interpolated[0]),
-            "q10": float(interpolated[1]),
-            "q25": float(interpolated[2]),
-            "q50": float(interpolated[3]),
-            "q75": float(interpolated[4]),
-            "q90": float(interpolated[5]),
-            "q975": float(interpolated[6]),
+            "q05": float(interpolated[1]),
+            "q10": float(interpolated[2]),
+            "q25": float(interpolated[3]),
+            "q50": float(interpolated[4]),
+            "q75": float(interpolated[5]),
+            "q90": float(interpolated[6]),
+            "q95": float(interpolated[7]),
+            "q975": float(interpolated[8]),
         }
         return quantiles, "direct_quantiles"
 
     if deterministic:
         quantiles = {
             "q025": float(flattened[0]),
+            "q05": float(flattened[0]),
             "q10": float(flattened[0]),
             "q25": float(flattened[0]),
             "q50": float(flattened[0]),
             "q75": float(flattened[0]),
             "q90": float(flattened[0]),
+            "q95": float(flattened[0]),
             "q975": float(flattened[0]),
         }
         return quantiles, "deterministic_sample"
@@ -107,15 +111,17 @@ def _extract_quantiles(
     samples = flattened
     if samples.size == 0:
         raise ValueError("Chronos returned no forecast samples.")
-    quantile_values = np.quantile(samples, [0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975], axis=0).reshape(-1)
+    quantile_values = np.quantile(samples, [0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.975], axis=0).reshape(-1)
     quantiles = {
         "q025": float(quantile_values[0]),
-        "q10": float(quantile_values[1]),
-        "q25": float(quantile_values[2]),
-        "q50": float(quantile_values[3]),
-        "q75": float(quantile_values[4]),
-        "q90": float(quantile_values[5]),
-        "q975": float(quantile_values[6]),
+        "q05": float(quantile_values[1]),
+        "q10": float(quantile_values[2]),
+        "q25": float(quantile_values[3]),
+        "q50": float(quantile_values[4]),
+        "q75": float(quantile_values[5]),
+        "q90": float(quantile_values[6]),
+        "q95": float(quantile_values[7]),
+        "q975": float(quantile_values[8]),
     }
     return quantiles, f"sampled_{int(requested_samples)}"
 
@@ -242,11 +248,13 @@ def expanding_window_forecast(
                 "actual": actual,
                 "forecast": quantiles["q50"],
                 "q025": quantiles["q025"],
+                "q05": quantiles["q05"],
                 "q10": quantiles["q10"],
                 "q25": quantiles["q25"],
                 "q50": quantiles["q50"],
                 "q75": quantiles["q75"],
                 "q90": quantiles["q90"],
+                "q95": quantiles["q95"],
                 "q975": quantiles["q975"],
                 "error": float(quantiles["q50"] - actual),
                 "model": "Chronos",
@@ -267,27 +275,35 @@ def expanding_window_forecast(
         (prediction_frame["actual"] >= prediction_frame["q10"])
         & (prediction_frame["actual"] <= prediction_frame["q90"])
     )
+    prediction_frame["inside_interval_90"] = (
+        (prediction_frame["actual"] >= prediction_frame["q05"])
+        & (prediction_frame["actual"] <= prediction_frame["q95"])
+    )
     prediction_frame["inside_interval_95"] = (
         (prediction_frame["actual"] >= prediction_frame["q025"])
         & (prediction_frame["actual"] <= prediction_frame["q975"])
     )
     prediction_frame["interval_width_50"] = prediction_frame["q75"] - prediction_frame["q25"]
     prediction_frame["interval_width"] = prediction_frame["q90"] - prediction_frame["q10"]
+    prediction_frame["interval_width_90"] = prediction_frame["q95"] - prediction_frame["q05"]
     prediction_frame["interval_width_95"] = prediction_frame["q975"] - prediction_frame["q025"]
     quantile_order_valid = bool(
         (
-            (prediction_frame["q025"] <= prediction_frame["q10"])
+            (prediction_frame["q025"] <= prediction_frame["q05"])
+            & (prediction_frame["q05"] <= prediction_frame["q10"])
             & (prediction_frame["q10"] <= prediction_frame["q25"])
             & (prediction_frame["q25"] <= prediction_frame["q50"])
             & (prediction_frame["q50"] <= prediction_frame["q75"])
             & (prediction_frame["q75"] <= prediction_frame["q90"])
-            & (prediction_frame["q90"] <= prediction_frame["q975"])
+            & (prediction_frame["q90"] <= prediction_frame["q95"])
+            & (prediction_frame["q95"] <= prediction_frame["q975"])
         ).all()
     )
     nonnegative_interval_width = bool(
         (
             (prediction_frame["interval_width_50"] >= 0)
             & (prediction_frame["interval_width"] >= 0)
+            & (prediction_frame["interval_width_90"] >= 0)
             & (prediction_frame["interval_width_95"] >= 0)
         ).all()
     )
@@ -295,6 +311,7 @@ def expanding_window_forecast(
         (
             (prediction_frame["interval_width_50"] == 0)
             & (prediction_frame["interval_width"] == 0)
+            & (prediction_frame["interval_width_90"] == 0)
             & (prediction_frame["interval_width_95"] == 0)
         ).all()
     )
@@ -318,9 +335,11 @@ def expanding_window_forecast(
                 ),
                 "median_interval_width_50": float(np.median(prediction_frame["interval_width_50"])),
                 "median_interval_width": float(np.median(prediction_frame["interval_width"])),
+                "median_interval_width_90": float(np.median(prediction_frame["interval_width_90"])),
                 "median_interval_width_95": float(np.median(prediction_frame["interval_width_95"])),
                 "interval_coverage_rate_50": float(prediction_frame["inside_interval_50"].mean()),
                 "interval_coverage_rate": float(prediction_frame["inside_interval"].mean()),
+                "interval_coverage_rate_90": float(prediction_frame["inside_interval_90"].mean()),
                 "interval_coverage_rate_95": float(prediction_frame["inside_interval_95"].mean()),
                 "quantile_order_valid": quantile_order_valid,
                 "interval_width_nonnegative": nonnegative_interval_width,

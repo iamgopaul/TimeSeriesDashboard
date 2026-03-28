@@ -36,11 +36,13 @@ FORECAST_PANEL_COLUMNS = [
     "absolute_error",
     "holdout_step",
     "q025",
+    "q05",
     "q10",
     "q25",
     "q50",
     "q75",
     "q90",
+    "q95",
     "q975",
 ]
 
@@ -53,7 +55,7 @@ def _build_forecast_panel_row(entity_id: str, entity_label: str, forecast_frame:
     working["entity_label"] = entity_label
     working["absolute_error"] = working["error"].abs() if "error" in working.columns else np.nan
     working["holdout_step"] = np.arange(1, len(working) + 1, dtype=int)
-    for column in ("q025", "q10", "q25", "q50", "q75", "q90", "q975"):
+    for column in ("q025", "q05", "q10", "q25", "q50", "q75", "q90", "q95", "q975"):
         if column not in working.columns:
             working[column] = np.nan
     return working[FORECAST_PANEL_COLUMNS].copy()

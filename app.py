@@ -14,6 +14,8 @@ from src.arima_pipeline import (
 from src.break_detection import exact_break_detection_status
 from src.chronos_pipeline import chronos_import_status, expanding_window_forecast as run_chronos_forecast
 from src.data_pipeline import (
+    TargetProvenance,
+    WinsorizationReport,
     apply_target_winsorization,
     build_dataset_profile,
     build_entity_eligibility_summary,
@@ -118,8 +120,6 @@ if "history_loaded" not in st.session_state:
     st.session_state["history_loaded"] = False
 if "history_loaded_label" not in st.session_state:
     st.session_state["history_loaded_label"] = ""
-if "compact_layout" not in st.session_state:
-    st.session_state["compact_layout"] = False
 
 
 def render_profile(profile) -> None:
@@ -323,9 +323,21 @@ def extract_model_forecast_frame(forecast_panel: pd.DataFrame, entity_id: str, m
     return working.sort_values("date").reset_index(drop=True)
 
 
+def available_interval_labels(forecast_frame: pd.DataFrame) -> list[str]:
+    interval_requirements = {
+        "50%": {"q25", "q75"},
+        "80%": {"q10", "q90"},
+        "90%": {"q05", "q95"},
+        "95%": {"q025", "q975"},
+    }
+    return [
+        label
+        for label, required_columns in interval_requirements.items()
+        if required_columns.issubset(forecast_frame.columns)
+    ]
+
+
 def responsive_columns(spec, compact_count: int = 1):
-    if not st.session_state.get("compact_layout", False):
-        return st.columns(spec)
     weights = [1] * spec if isinstance(spec, int) else list(spec)
     if compact_count <= 1:
         return tuple(st.container() for _ in weights)
@@ -340,12 +352,6 @@ def responsive_columns(spec, compact_count: int = 1):
 with st.sidebar:
     st.header("Upload")
     uploaded_file = st.file_uploader("CSV dataset", type=["csv"])
-    compact_layout = st.toggle(
-        "Compact/mobile layout",
-        value=bool(st.session_state.get("compact_layout", False)),
-        help="Use fewer side-by-side columns and stacked charts for smaller screens.",
-    )
-    st.session_state["compact_layout"] = bool(compact_layout)
     chronos_available, chronos_message = chronos_import_status()
     if chronos_available:
         st.success("Chronos dependency detected.")
@@ -397,168 +403,233 @@ with st.sidebar:
                     st.session_state["history_loaded_label"] = ""
                 st.rerun()
 
-if uploaded_file is None:
-    st.info("Upload a CSV file to begin.")
-    st.stop()
-
-upload_bytes = uploaded_file.getvalue()
-raw_frame = cached_load_csv(upload_bytes)
-schema_inference = infer_schema_mapping(raw_frame.columns)
-
-mapping = render_mapping_editor(list(raw_frame.columns), schema_inference.mapping)
-mapping_errors = validate_mapping(mapping, raw_frame.columns)
-if mapping_errors:
-    for error in mapping_errors:
-        st.error(error)
-    st.stop()
-
-prepared = cached_prepare_dataset(upload_bytes, tuple(sorted(mapping.items())))
-profile = build_dataset_profile(prepared, warnings=schema_inference.warnings)
-render_profile(profile)
-
-with st.expander("Detected Mapping", expanded=False):
-    st.dataframe(describe_mapping(mapping), width="stretch")
-
-metric_columns = detect_metric_columns(prepared)
-if not metric_columns:
-    st.error("No numeric target columns were detected after applying the schema mapping.")
-    st.stop()
-
-overview_left, overview_right = responsive_columns([2, 1], compact_count=1)
-with overview_left:
-    analysis_scope = st.selectbox(
-        "Analysis scope",
-        ["Single entity diagnostics", "Full cleaned dataset summary"],
-    )
-    target_column = st.selectbox(
-        "Target metric",
-        metric_columns,
-        index=metric_columns.index("ROA") if "ROA" in metric_columns else 0,
-    )
-    entity_options = build_entity_options(prepared)
-    entity_label = st.selectbox("Firm / entity", entity_options)
-
-entity_id = resolve_entity_id(prepared, entity_label)
-document_holdout_size = infer_document_holdout_size(
-    build_target_series(prepared, entity_id, target_column)
-)
-
-with overview_right:
-    evaluation_mode_label = st.selectbox(
-        "Evaluation mode",
-        ["Strict deterministic", "Practical fallback"],
-        help="Choose whether the dashboard should enforce strict audit gates or continue with practical fallbacks.",
-    )
-    evaluation_mode = "strict" if evaluation_mode_label == "Strict deterministic" else "practical"
-    if evaluation_mode == "strict":
-        st.caption(
-            "`Strict deterministic`: uses strict Bai-Perron break detection, enforces the Ljung-Box residual whitening gate, "
-            "and avoids fallback forecasts when the selected model fails."
-        )
-    else:
-        st.caption(
-            "`Practical fallback`: uses the more forgiving pipeline, allows fallback behavior when ARIMA windows fail, "
-            "and is better for exploratory analysis when you still want results."
-        )
-    if evaluation_mode == "strict" and not strict_breaks_available:
-        st.caption("Strict mode requires R `strucchange`, which is currently unavailable.")
-    holdout_policy = st.selectbox(
-        "Holdout policy",
-        ["Document default (2023-2024 when available)", "Manual holdout quarters"],
-    )
-    if holdout_policy == "Document default (2023-2024 when available)" and document_holdout_size is not None:
-        holdout_size = int(document_holdout_size)
-        st.caption(f"Using document-aligned holdout of `{holdout_size}` quarter(s) covering the final 2023-2024 window.")
-    else:
-        if holdout_policy == "Document default (2023-2024 when available)" and document_holdout_size is None:
-            st.caption("Document-aligned 2023-2024 holdout is unavailable for this firm, so manual holdout is being used.")
-        holdout_size = st.slider("Holdout quarters", min_value=2, max_value=12, value=8)
-    max_p = st.slider("Max AR order (p)", min_value=0, max_value=4, value=2)
-    max_d = st.slider("Max differencing order (d)", min_value=0, max_value=2, value=2)
-    max_q = st.slider("Max MA order (q)", min_value=0, max_value=4, value=2)
-    run_chronos = st.checkbox("Run Chronos", value=False)
-    chronos_deterministic = st.checkbox("Chronos deterministic inference", value=True, disabled=not run_chronos)
-    chronos_seed = int(
-        st.number_input("Chronos seed", min_value=0, max_value=999999, value=17, step=1, disabled=not run_chronos)
-    )
-    chronos_samples = int(
-        st.slider("Chronos samples", min_value=5, max_value=100, value=20, step=5, disabled=not run_chronos or chronos_deterministic)
-    )
-
-with st.expander("Audit Controls", expanded=False):
-    enable_winsorization = st.checkbox("Enable winsorization for target metric", value=False)
-    winsor_lower = float(st.slider("Winsor lower percentile", min_value=0.0, max_value=0.1, value=0.01, step=0.01))
-    winsor_upper = float(st.slider("Winsor upper percentile", min_value=0.9, max_value=1.0, value=0.99, step=0.01))
-    minimum_history = int(st.slider("Minimum usable history for audit checks", min_value=8, max_value=40, value=10))
-
-analysis_frame, winsor_report = apply_target_winsorization(
-    prepared,
-    target_column,
-    enabled=enable_winsorization,
-    lower_quantile=winsor_lower,
-    upper_quantile=winsor_upper,
-)
-target_provenance = describe_target_provenance(analysis_frame, target_column)
-eligibility_summary = build_entity_eligibility_summary(analysis_frame, target_column, min_history=minimum_history)
-entity_series = build_target_series(analysis_frame, entity_id, target_column)
-
-with st.expander("Audit Summary", expanded=False):
-    audit_left, audit_middle, audit_right = responsive_columns(3, compact_count=1)
-    audit_left.metric("Eligible firms", str(int(eligibility_summary["eligible"].sum())))
-    audit_middle.metric("Excluded firms", str(int((~eligibility_summary["eligible"]).sum())))
-    audit_right.metric("Winsorized rows", str(winsor_report.changed_rows))
-    st.write(
-        {
-            "target_provenance": target_provenance.source_type,
-            "provenance_detail": target_provenance.detail,
-            "winsorization_detail": winsor_report.detail,
-            "minimum_history_rule": minimum_history,
-        }
-    )
-    st.dataframe(eligibility_summary.head(50), width="stretch")
-
-if not st.session_state.get("history_loaded") and analysis_scope == "Single entity diagnostics" and len(entity_series) < holdout_size + 10:
-    st.error("The selected series is too short for the requested holdout and ARIMA diagnostics.")
-    st.stop()
-
-continuity = compute_continuity_summary(entity_series)
-with st.expander("Series Continuity", expanded=False):
-    st.dataframe(continuity, width="stretch")
-
-render_execution_console()
-
-analysis_meta = {
-    "analysis_scope": analysis_scope,
-    "entity_id": entity_id,
-    "entity_label": entity_label,
-    "target_column": target_column,
-    "holdout_size": int(holdout_size),
-    "holdout_policy": holdout_policy,
-    "evaluation_mode": evaluation_mode,
-    "max_p": int(max_p),
-    "max_d": int(max_d),
-    "max_q": int(max_q),
-    "run_chronos": bool(run_chronos),
-    "chronos_deterministic": bool(chronos_deterministic),
-    "chronos_seed": int(chronos_seed),
-    "chronos_samples": int(chronos_samples),
-    "winsorization_enabled": bool(enable_winsorization),
-    "winsor_lower": float(winsor_lower),
-    "winsor_upper": float(winsor_upper),
-    "minimum_history": int(minimum_history),
-    "target_provenance": target_provenance.source_type,
-    "series_length": int(len(entity_series)),
-    "series_end": entity_series["date"].max().isoformat() if not entity_series.empty else "",
-    "strict_breaks_available": bool(strict_breaks_available),
-}
-
-run_analysis = st.button("Run Analysis", type="primary")
-cached_analysis_meta = st.session_state.get("analysis_meta")
 history_loaded = bool(st.session_state.get("history_loaded"))
-has_matching_analysis = (
-    (cached_analysis_meta == analysis_meta and st.session_state.get("analysis_result") is not None)
-    or (history_loaded and st.session_state.get("analysis_result") is not None)
-)
+snapshot_ready = history_loaded and st.session_state.get("analysis_result") is not None
+dataset_uploaded = uploaded_file is not None
+
+if not dataset_uploaded and not snapshot_ready:
+    st.info("Upload a CSV file to begin, or load a saved history snapshot.")
+    st.stop()
+
+if dataset_uploaded:
+    upload_bytes = uploaded_file.getvalue()
+    raw_frame = cached_load_csv(upload_bytes)
+    schema_inference = infer_schema_mapping(raw_frame.columns)
+
+    mapping = render_mapping_editor(list(raw_frame.columns), schema_inference.mapping)
+    mapping_errors = validate_mapping(mapping, raw_frame.columns)
+    if mapping_errors:
+        for error in mapping_errors:
+            st.error(error)
+        st.stop()
+
+    prepared = cached_prepare_dataset(upload_bytes, tuple(sorted(mapping.items())))
+    profile = build_dataset_profile(prepared, warnings=schema_inference.warnings)
+    render_profile(profile)
+
+    with st.expander("Detected Mapping", expanded=False):
+        st.dataframe(describe_mapping(mapping), width="stretch")
+
+    metric_columns = detect_metric_columns(prepared)
+    if not metric_columns:
+        st.error("No numeric target columns were detected after applying the schema mapping.")
+        st.stop()
+
+    overview_left, overview_right = responsive_columns([2, 1], compact_count=1)
+    with overview_left:
+        analysis_scope = st.selectbox(
+            "Analysis scope",
+            ["Single entity diagnostics", "Full cleaned dataset summary"],
+        )
+        target_column = st.selectbox(
+            "Target metric",
+            metric_columns,
+            index=metric_columns.index("ROA") if "ROA" in metric_columns else 0,
+        )
+        entity_options = build_entity_options(prepared)
+        entity_label = st.selectbox("Firm / entity", entity_options)
+
+    entity_id = resolve_entity_id(prepared, entity_label)
+    document_holdout_size = infer_document_holdout_size(
+        build_target_series(prepared, entity_id, target_column)
+    )
+
+    with overview_right:
+        evaluation_mode_label = st.selectbox(
+            "Evaluation mode",
+            ["Strict deterministic", "Practical fallback"],
+            help="Choose whether the dashboard should enforce strict audit gates or continue with practical fallbacks.",
+        )
+        evaluation_mode = "strict" if evaluation_mode_label == "Strict deterministic" else "practical"
+        if evaluation_mode == "strict":
+            st.caption(
+                "`Strict deterministic`: uses strict Bai-Perron break detection, enforces the Ljung-Box residual whitening gate, "
+                "and avoids fallback forecasts when the selected model fails."
+            )
+        else:
+            st.caption(
+                "`Practical fallback`: uses the more forgiving pipeline, allows fallback behavior when ARIMA windows fail, "
+                "and is better for exploratory analysis when you still want results."
+            )
+        if evaluation_mode == "strict" and not strict_breaks_available:
+            st.caption("Strict mode requires R `strucchange`, which is currently unavailable.")
+        holdout_policy = st.selectbox(
+            "Holdout policy",
+            ["Document default (2023-2024 when available)", "Manual holdout quarters"],
+        )
+        if holdout_policy == "Document default (2023-2024 when available)" and document_holdout_size is not None:
+            holdout_size = int(document_holdout_size)
+            st.caption(f"Using document-aligned holdout of `{holdout_size}` quarter(s) covering the final 2023-2024 window.")
+        else:
+            if holdout_policy == "Document default (2023-2024 when available)" and document_holdout_size is None:
+                st.caption("Document-aligned 2023-2024 holdout is unavailable for this firm, so manual holdout is being used.")
+            holdout_size = st.slider("Holdout quarters", min_value=2, max_value=12, value=8)
+        max_p = st.slider("Max AR order (p)", min_value=0, max_value=4, value=2)
+        max_d = st.slider("Max differencing order (d)", min_value=0, max_value=2, value=2)
+        max_q = st.slider("Max MA order (q)", min_value=0, max_value=4, value=2)
+        run_chronos = st.checkbox("Run Chronos", value=False)
+        chronos_deterministic = st.checkbox("Chronos deterministic inference", value=True, disabled=not run_chronos)
+        chronos_seed = int(
+            st.number_input("Chronos seed", min_value=0, max_value=999999, value=17, step=1, disabled=not run_chronos)
+        )
+        chronos_samples = int(
+            st.slider("Chronos samples", min_value=5, max_value=100, value=20, step=5, disabled=not run_chronos or chronos_deterministic)
+        )
+
+    with st.expander("Audit Controls", expanded=False):
+        enable_winsorization = st.checkbox("Enable winsorization for target metric", value=False)
+        winsor_lower = float(st.slider("Winsor lower percentile", min_value=0.0, max_value=0.1, value=0.01, step=0.01))
+        winsor_upper = float(st.slider("Winsor upper percentile", min_value=0.9, max_value=1.0, value=0.99, step=0.01))
+        minimum_history = int(st.slider("Minimum usable history for audit checks", min_value=8, max_value=40, value=10))
+
+    analysis_frame, winsor_report = apply_target_winsorization(
+        prepared,
+        target_column,
+        enabled=enable_winsorization,
+        lower_quantile=winsor_lower,
+        upper_quantile=winsor_upper,
+    )
+    target_provenance = describe_target_provenance(analysis_frame, target_column)
+    eligibility_summary = build_entity_eligibility_summary(analysis_frame, target_column, min_history=minimum_history)
+    entity_series = build_target_series(analysis_frame, entity_id, target_column)
+
+    with st.expander("Audit Summary", expanded=False):
+        audit_left, audit_middle, audit_right = responsive_columns(3, compact_count=1)
+        audit_left.metric("Eligible firms", str(int(eligibility_summary["eligible"].sum())))
+        audit_middle.metric("Excluded firms", str(int((~eligibility_summary["eligible"]).sum())))
+        audit_right.metric("Winsorized rows", str(winsor_report.changed_rows))
+        st.write(
+            {
+                "target_provenance": target_provenance.source_type,
+                "provenance_detail": target_provenance.detail,
+                "winsorization_detail": winsor_report.detail,
+                "minimum_history_rule": minimum_history,
+            }
+        )
+        st.dataframe(eligibility_summary.head(50), width="stretch")
+
+    if not st.session_state.get("history_loaded") and analysis_scope == "Single entity diagnostics" and len(entity_series) < holdout_size + 10:
+        st.error("The selected series is too short for the requested holdout and ARIMA diagnostics.")
+        st.stop()
+
+    continuity = compute_continuity_summary(entity_series)
+    with st.expander("Series Continuity", expanded=False):
+        st.dataframe(continuity, width="stretch")
+
+    render_execution_console()
+
+    analysis_meta = {
+        "analysis_scope": analysis_scope,
+        "entity_id": entity_id,
+        "entity_label": entity_label,
+        "target_column": target_column,
+        "holdout_size": int(holdout_size),
+        "holdout_policy": holdout_policy,
+        "evaluation_mode": evaluation_mode,
+        "max_p": int(max_p),
+        "max_d": int(max_d),
+        "max_q": int(max_q),
+        "run_chronos": bool(run_chronos),
+        "chronos_deterministic": bool(chronos_deterministic),
+        "chronos_seed": int(chronos_seed),
+        "chronos_samples": int(chronos_samples),
+        "winsorization_enabled": bool(enable_winsorization),
+        "winsor_lower": float(winsor_lower),
+        "winsor_upper": float(winsor_upper),
+        "minimum_history": int(minimum_history),
+        "target_provenance": target_provenance.source_type,
+        "series_length": int(len(entity_series)),
+        "series_end": entity_series["date"].max().isoformat() if not entity_series.empty else "",
+        "strict_breaks_available": bool(strict_breaks_available),
+    }
+
+    run_analysis = st.button("Run Analysis", type="primary")
+    cached_analysis_meta = st.session_state.get("analysis_meta")
+    has_matching_analysis = (
+        (cached_analysis_meta == analysis_meta and st.session_state.get("analysis_result") is not None)
+        or (history_loaded and st.session_state.get("analysis_result") is not None)
+    )
+else:
+    analysis_result = st.session_state["analysis_result"]
+    analysis_meta = st.session_state.get("analysis_meta") or {}
+    analysis_scope = str(analysis_result.get("analysis_scope", analysis_meta.get("analysis_scope", "Single entity diagnostics")))
+    target_column = str(analysis_meta.get("target_column", "Saved target"))
+    entity_label = str(analysis_meta.get("entity_label", "Saved entity"))
+    entity_id = str(analysis_meta.get("entity_id", entity_label))
+    holdout_size = int(analysis_meta.get("holdout_size", 0) or 0)
+    holdout_policy = str(analysis_meta.get("holdout_policy", "Saved snapshot"))
+    evaluation_mode = str(analysis_meta.get("evaluation_mode", "practical"))
+    max_p = int(analysis_meta.get("max_p", 2) or 2)
+    max_d = int(analysis_meta.get("max_d", 2) or 2)
+    max_q = int(analysis_meta.get("max_q", 2) or 2)
+    run_chronos = bool(analysis_meta.get("run_chronos", False))
+    chronos_deterministic = bool(analysis_meta.get("chronos_deterministic", True))
+    chronos_seed = int(analysis_meta.get("chronos_seed", 17) or 17)
+    chronos_samples = int(analysis_meta.get("chronos_samples", 20) or 20)
+    enable_winsorization = bool(analysis_meta.get("winsorization_enabled", False))
+    winsor_lower = float(analysis_meta.get("winsor_lower", 0.01) or 0.01)
+    winsor_upper = float(analysis_meta.get("winsor_upper", 0.99) or 0.99)
+    minimum_history = int(analysis_meta.get("minimum_history", 10) or 10)
+    prepared = pd.DataFrame()
+    analysis_frame = pd.DataFrame()
+    raw_frame = pd.DataFrame()
+    mapping = {}
+    entity_series = analysis_result.get("entity_series", pd.DataFrame(columns=["date", "value"]))
+    target_provenance = analysis_result.get("target_provenance") or TargetProvenance(
+        target_column=target_column,
+        source_type=str(analysis_meta.get("target_provenance", "saved_snapshot")),
+        can_reconstruct_from_raw=False,
+        detail="Loaded from saved history snapshot.",
+    )
+    winsor_report = analysis_result.get("winsor_report") or WinsorizationReport(
+        enabled=enable_winsorization,
+        target_column=target_column,
+        lower_quantile=winsor_lower,
+        upper_quantile=winsor_upper,
+        changed_rows=0,
+        detail="Loaded from saved history snapshot.",
+    )
+    eligibility_summary = analysis_result.get("eligibility_summary", pd.DataFrame())
+    render_execution_console()
+    st.info("Using a saved history snapshot. Upload a CSV file if you want to run a new analysis or recompute results.")
+    with st.expander("Loaded Snapshot Context", expanded=False):
+        st.write(
+            {
+                "analysis_scope": analysis_scope,
+                "target_column": target_column,
+                "entity_label": entity_label,
+                "holdout_size": holdout_size,
+                "evaluation_mode": evaluation_mode,
+                "winsorization_enabled": enable_winsorization,
+            }
+        )
+    if analysis_scope == "Single entity diagnostics":
+        continuity = compute_continuity_summary(entity_series)
+        with st.expander("Series Continuity", expanded=False):
+            st.dataframe(continuity, width="stretch")
+    run_analysis = False
+    cached_analysis_meta = st.session_state.get("analysis_meta")
+    has_matching_analysis = st.session_state.get("analysis_result") is not None
 
 if run_analysis:
     try:
@@ -910,7 +981,7 @@ view_options = (
     if analysis_scope == "Single entity diagnostics"
     else ["Dataset Summary", "Tournament Summary", "NLI Distribution", "Exports"]
 )
-view = st.radio("View", view_options, horizontal=not st.session_state.get("compact_layout", False), key="dashboard_view")
+view = st.radio("View", view_options, horizontal=False, key="dashboard_view")
 
 if view == "Forecasts":
     metric_frames = [naive_forecast.metrics, arima_forecast.metrics]
@@ -978,19 +1049,20 @@ if view == "Forecasts":
             st.warning("Chronos quantile order check failed.")
         if not bool(chronos_forecast.metrics["interval_width_nonnegative"].iloc[0]):
             st.warning("Chronos interval width check failed.")
-        has_extended_intervals = {"q025", "q25", "q75", "q975"}.issubset(chronos_forecast.predictions.columns)
-        intervals_collapsed = (
-            bool(chronos_forecast.metrics["intervals_collapsed"].iloc[0])
-            if "intervals_collapsed" in chronos_forecast.metrics.columns
-            else bool(
-                has_extended_intervals
-                and (
-                    (chronos_forecast.predictions["q025"] == chronos_forecast.predictions["q975"])
-                    & (chronos_forecast.predictions["q25"] == chronos_forecast.predictions["q75"])
-                    & (chronos_forecast.predictions["q10"] == chronos_forecast.predictions["q90"])
-                ).all()
-            )
-        )
+        interval_labels = available_interval_labels(chronos_forecast.predictions)
+        if "intervals_collapsed" in chronos_forecast.metrics.columns:
+            intervals_collapsed = bool(chronos_forecast.metrics["intervals_collapsed"].iloc[0])
+        else:
+            collapse_checks = []
+            if {"q25", "q75"}.issubset(chronos_forecast.predictions.columns):
+                collapse_checks.append((chronos_forecast.predictions["q25"] == chronos_forecast.predictions["q75"]).all())
+            if {"q10", "q90"}.issubset(chronos_forecast.predictions.columns):
+                collapse_checks.append((chronos_forecast.predictions["q10"] == chronos_forecast.predictions["q90"]).all())
+            if {"q05", "q95"}.issubset(chronos_forecast.predictions.columns):
+                collapse_checks.append((chronos_forecast.predictions["q05"] == chronos_forecast.predictions["q95"]).all())
+            if {"q025", "q975"}.issubset(chronos_forecast.predictions.columns):
+                collapse_checks.append((chronos_forecast.predictions["q025"] == chronos_forecast.predictions["q975"]).all())
+            intervals_collapsed = bool(collapse_checks and all(collapse_checks))
         st.plotly_chart(
             build_forecast_figure(
                 result_entity_series,
@@ -999,43 +1071,41 @@ if view == "Forecasts":
             ),
             use_container_width=True,
         )
-        if not has_extended_intervals:
-            st.info("This saved Chronos result only contains the original 80% interval fields, so the new 50% and 95% charts are unavailable.")
-        elif intervals_collapsed:
-            st.info(
-                "Chronos is running in deterministic mode, so the 50%, 80%, and 95% intervals collapse to the point forecast. "
-                "Switch to sampled inference to see visible uncertainty bands."
-            )
+        if not interval_labels:
+            st.info("This saved Chronos result does not contain the interval columns needed for the dedicated uncertainty charts.")
         else:
             st.subheader("Chronos Prediction Intervals")
-            interval_left, interval_right = responsive_columns(2, compact_count=1)
-            interval_left.plotly_chart(
-                build_interval_forecast_figure(
-                    result_entity_series,
-                    chronos_forecast.predictions,
-                    f"Chronos 50% Interval: {active_entity_label}",
-                    "50%",
-                ),
-                use_container_width=True,
-            )
-            interval_right.plotly_chart(
-                build_interval_forecast_figure(
-                    result_entity_series,
-                    chronos_forecast.predictions,
-                    f"Chronos 80% Interval: {active_entity_label}",
-                    "80%",
-                ),
-                use_container_width=True,
-            )
-            st.plotly_chart(
-                build_interval_forecast_figure(
-                    result_entity_series,
-                    chronos_forecast.predictions,
-                    f"Chronos 95% Interval: {active_entity_label}",
-                    "95%",
-                ),
-                use_container_width=True,
-            )
+            if intervals_collapsed:
+                st.info(
+                    "Chronos is running in deterministic mode, so the 50%, 80%, 90%, and 95% intervals collapse to the point forecast. "
+                    "The charts are still shown below, but the bands will sit directly on top of the median prediction."
+                )
+            first_row_labels = interval_labels[:2]
+            second_row_labels = interval_labels[2:]
+            if first_row_labels:
+                interval_columns = responsive_columns(len(first_row_labels), compact_count=1)
+                for container, label in zip(interval_columns, first_row_labels):
+                    container.plotly_chart(
+                        build_interval_forecast_figure(
+                            result_entity_series,
+                            chronos_forecast.predictions,
+                            f"Chronos {label} Interval: {active_entity_label}",
+                            label,
+                        ),
+                        use_container_width=True,
+                    )
+            if second_row_labels:
+                interval_columns = responsive_columns(len(second_row_labels), compact_count=1)
+                for container, label in zip(interval_columns, second_row_labels):
+                    container.plotly_chart(
+                        build_interval_forecast_figure(
+                            result_entity_series,
+                            chronos_forecast.predictions,
+                            f"Chronos {label} Interval: {active_entity_label}",
+                            label,
+                        ),
+                        use_container_width=True,
+                    )
         metric_frames.append(chronos_forecast.metrics)
         comparison = build_model_gap(arima_forecast.predictions, chronos_forecast.predictions)
         if not comparison.empty:
@@ -1096,77 +1166,81 @@ elif view == "Dataset Summary":
 
 elif view == "Tournament Summary":
     st.caption("Run a cross-firm forecasting tournament to compare Naive, ARIMA, and Chronos across firms.")
-    tournament_limit = st.number_input(
-        "Max entities for tournament",
-        min_value=10,
-        max_value=max(10, int(analysis_frame["entity_id"].nunique())),
-        value=min(50, int(analysis_frame["entity_id"].nunique())),
-        step=10,
-        key="tournament_limit",
-    )
-    tournament_run_chronos = st.checkbox("Include Chronos in tournament", value=run_chronos, key="tournament_run_chronos")
-    tournament_meta = {
-        "target_column": target_column,
-        "tournament_limit": int(tournament_limit),
-        "holdout_size": int(holdout_size),
-        "run_chronos": bool(tournament_run_chronos),
-        "evaluation_mode": evaluation_mode,
-        "winsorization_enabled": bool(enable_winsorization),
-    }
-    tournament_left, tournament_right = responsive_columns([1, 1], compact_count=1)
-    compute_tournament = tournament_left.button("Compute Tournament Summary")
-    clear_tournament = tournament_right.button("Clear Tournament Result")
-
-    if clear_tournament:
-        st.session_state["tournament_result"] = None
-        st.session_state["tournament_meta"] = None
-
-    if compute_tournament:
-        reset_execution_console()
-        append_execution_log(
-            f"Tournament requested for `{target_column}` across up to {int(tournament_limit)} firms."
+    if dataset_uploaded:
+        tournament_limit = st.number_input(
+            "Max entities for tournament",
+            min_value=10,
+            max_value=max(10, int(analysis_frame["entity_id"].nunique())),
+            value=min(50, int(analysis_frame["entity_id"].nunique())),
+            step=10,
+            key="tournament_limit",
         )
-        update_step_status("Compute tournament", "running", f"Limit={int(tournament_limit)}")
-        progress_bar = st.progress(0, text="Preparing tournament run...")
-        progress_state = {"last_logged_processed": 0}
+        tournament_run_chronos = st.checkbox("Include Chronos in tournament", value=run_chronos, key="tournament_run_chronos")
+        tournament_meta = {
+            "target_column": target_column,
+            "tournament_limit": int(tournament_limit),
+            "holdout_size": int(holdout_size),
+            "run_chronos": bool(tournament_run_chronos),
+            "evaluation_mode": evaluation_mode,
+            "winsorization_enabled": bool(enable_winsorization),
+        }
+        tournament_left, tournament_right = responsive_columns([1, 1], compact_count=1)
+        compute_tournament = tournament_left.button("Compute Tournament Summary")
+        clear_tournament = tournament_right.button("Clear Tournament Result")
 
-        def update_tournament_progress(processed: int, total: int, label: str) -> None:
-            denominator = max(total, 1)
-            progress_bar.progress(min(processed / denominator, 1.0), text=f"Tournament {processed}/{denominator}: {label}")
-            if processed == 1 or processed == denominator or processed - progress_state["last_logged_processed"] >= 10:
-                append_execution_log(f"Tournament progress {processed}/{denominator}. Current firm: {label}")
-                progress_state["last_logged_processed"] = processed
+        if clear_tournament:
+            st.session_state["tournament_result"] = None
+            st.session_state["tournament_meta"] = None
 
-        st.session_state["tournament_result"] = compute_forecasting_tournament(
-            analysis_frame,
-            target_column,
-            holdout_size=holdout_size,
-            max_entities=int(tournament_limit),
-            run_chronos=bool(tournament_run_chronos),
-            evaluation_mode=evaluation_mode,
-            max_p=max_p,
-            max_d=max_d,
-            max_q=max_q,
-            chronos_deterministic=chronos_deterministic,
-            chronos_seed=chronos_seed,
-            chronos_samples=chronos_samples,
-            progress_callback=update_tournament_progress,
-        )
-        st.session_state["tournament_meta"] = tournament_meta
-        tournament_result = st.session_state["tournament_result"]
-        progress_bar.progress(1.0, text="Tournament complete.")
-        update_step_status(
-            "Compute tournament",
-            "completed",
-            f"Successful={tournament_result.successful_entities}, Failed={tournament_result.failed_entities}",
-        )
-        append_execution_log(
-            "Tournament completed. "
-            f"Processed={tournament_result.processed_entities}, "
-            f"Successful={tournament_result.successful_entities}, "
-            f"Failed={tournament_result.failed_entities}."
-        )
-        save_current_snapshot("tournament", f"Tournament | {target_column} | top {int(tournament_limit)}")
+        if compute_tournament:
+            reset_execution_console()
+            append_execution_log(
+                f"Tournament requested for `{target_column}` across up to {int(tournament_limit)} firms."
+            )
+            update_step_status("Compute tournament", "running", f"Limit={int(tournament_limit)}")
+            progress_bar = st.progress(0, text="Preparing tournament run...")
+            progress_state = {"last_logged_processed": 0}
+
+            def update_tournament_progress(processed: int, total: int, label: str) -> None:
+                denominator = max(total, 1)
+                progress_bar.progress(min(processed / denominator, 1.0), text=f"Tournament {processed}/{denominator}: {label}")
+                if processed == 1 or processed == denominator or processed - progress_state["last_logged_processed"] >= 10:
+                    append_execution_log(f"Tournament progress {processed}/{denominator}. Current firm: {label}")
+                    progress_state["last_logged_processed"] = processed
+
+            st.session_state["tournament_result"] = compute_forecasting_tournament(
+                analysis_frame,
+                target_column,
+                holdout_size=holdout_size,
+                max_entities=int(tournament_limit),
+                run_chronos=bool(tournament_run_chronos),
+                evaluation_mode=evaluation_mode,
+                max_p=max_p,
+                max_d=max_d,
+                max_q=max_q,
+                chronos_deterministic=chronos_deterministic,
+                chronos_seed=chronos_seed,
+                chronos_samples=chronos_samples,
+                progress_callback=update_tournament_progress,
+            )
+            st.session_state["tournament_meta"] = tournament_meta
+            tournament_result = st.session_state["tournament_result"]
+            progress_bar.progress(1.0, text="Tournament complete.")
+            update_step_status(
+                "Compute tournament",
+                "completed",
+                f"Successful={tournament_result.successful_entities}, Failed={tournament_result.failed_entities}",
+            )
+            append_execution_log(
+                "Tournament completed. "
+                f"Processed={tournament_result.processed_entities}, "
+                f"Successful={tournament_result.successful_entities}, "
+                f"Failed={tournament_result.failed_entities}."
+            )
+            save_current_snapshot("tournament", f"Tournament | {target_column} | top {int(tournament_limit)}")
+    else:
+        st.caption("Upload a CSV file to compute a new tournament run. Saved tournament history remains viewable below.")
+        tournament_meta = st.session_state.get("tournament_meta")
 
     tournament_result = st.session_state.get("tournament_result")
     stored_tournament_meta = st.session_state.get("tournament_meta")
@@ -1348,26 +1422,37 @@ elif view == "Tournament Summary":
                     ),
                     use_container_width=True,
                 )
-                if not selected_chronos.empty and {"q025", "q25", "q75", "q975"}.issubset(selected_chronos.columns):
-                    chronos_interval_left, chronos_interval_right = responsive_columns(2, compact_count=1)
-                    chronos_interval_left.plotly_chart(
-                        build_interval_forecast_figure(
-                            selected_actual_series,
-                            selected_chronos,
-                            f"Chronos 50% Interval: {selected_drilldown_label}",
-                            "50%",
-                        ),
-                        use_container_width=True,
+                selected_interval_labels = available_interval_labels(selected_chronos)
+                if selected_interval_labels:
+                    st.caption(
+                        "Saved tournament drilldowns also include the Chronos interval bands captured during the multi-firm run."
                     )
-                    chronos_interval_right.plotly_chart(
-                        build_interval_forecast_figure(
-                            selected_actual_series,
-                            selected_chronos,
-                            f"Chronos 80% Interval: {selected_drilldown_label}",
-                            "80%",
-                        ),
-                        use_container_width=True,
-                    )
+                    first_row_labels = selected_interval_labels[:2]
+                    second_row_labels = selected_interval_labels[2:]
+                    if first_row_labels:
+                        interval_columns = responsive_columns(len(first_row_labels), compact_count=1)
+                        for container, label in zip(interval_columns, first_row_labels):
+                            container.plotly_chart(
+                                build_interval_forecast_figure(
+                                    selected_actual_series,
+                                    selected_chronos,
+                                    f"Chronos {label} Interval: {selected_drilldown_label}",
+                                    label,
+                                ),
+                                use_container_width=True,
+                            )
+                    if second_row_labels:
+                        interval_columns = responsive_columns(len(second_row_labels), compact_count=1)
+                        for container, label in zip(interval_columns, second_row_labels):
+                            container.plotly_chart(
+                                build_interval_forecast_figure(
+                                    selected_actual_series,
+                                    selected_chronos,
+                                    f"Chronos {label} Interval: {selected_drilldown_label}",
+                                    label,
+                                ),
+                                use_container_width=True,
+                            )
                 if not selected_metrics.empty:
                     with st.expander("Selected firm forecast summary", expanded=False):
                         st.dataframe(selected_metrics, width="stretch")
@@ -1384,77 +1469,80 @@ elif view == "NLI Distribution":
         "Computing NLI across firms is expensive because each firm runs the full break-detection, "
         "ARIMA, and residual-testing pipeline. Start with a smaller sample."
     )
-    default_limit = int(analysis_frame["entity_id"].nunique()) if analysis_scope == "Full cleaned dataset summary" else min(50, int(analysis_frame["entity_id"].nunique()))
-    distribution_limit = st.number_input(
-        "Max entities for NLI distribution",
-        min_value=25,
-        max_value=max(25, int(analysis_frame["entity_id"].nunique())),
-        value=default_limit,
-        step=25,
-        key="distribution_limit",
-    )
-    distribution_meta = {
-        "target_column": target_column,
-        "distribution_limit": int(distribution_limit),
-        "row_count": int(len(analysis_frame)),
-        "entity_count": int(analysis_frame["entity_id"].nunique()),
-        "winsorization_enabled": bool(enable_winsorization),
-        "target_provenance": target_provenance.source_type,
-    }
-
-    action_left, action_right = responsive_columns([1, 1], compact_count=1)
-    compute_distribution = action_left.button("Compute NLI Distribution")
-    clear_distribution = action_right.button("Clear Distribution Result")
-
-    if clear_distribution:
-        st.session_state["nli_distribution_result"] = None
-        st.session_state["nli_distribution_meta"] = None
-
-    if compute_distribution:
-        reset_execution_console()
-        append_execution_log(
-            f"NLI distribution requested for target `{target_column}` across up to {int(distribution_limit)} firms."
+    if dataset_uploaded:
+        default_limit = int(analysis_frame["entity_id"].nunique()) if analysis_scope == "Full cleaned dataset summary" else min(50, int(analysis_frame["entity_id"].nunique()))
+        distribution_limit = st.number_input(
+            "Max entities for NLI distribution",
+            min_value=25,
+            max_value=max(25, int(analysis_frame["entity_id"].nunique())),
+            value=default_limit,
+            step=25,
+            key="distribution_limit",
         )
-        update_step_status("Compute NLI distribution", "running", f"Limit={int(distribution_limit)}")
-        progress_bar = st.progress(0, text="Preparing NLI distribution run...")
-        status_placeholder = st.empty()
-        progress_state = {"last_logged_processed": 0}
+        distribution_meta = {
+            "target_column": target_column,
+            "distribution_limit": int(distribution_limit),
+            "row_count": int(len(analysis_frame)),
+            "entity_count": int(analysis_frame["entity_id"].nunique()),
+            "winsorization_enabled": bool(enable_winsorization),
+            "target_provenance": target_provenance.source_type,
+        }
 
-        def update_progress(processed: int, total: int, label: str) -> None:
-            denominator = max(total, 1)
-            progress_bar.progress(
-                min(processed / denominator, 1.0),
-                text=f"Processing {processed}/{denominator}: {label}",
+        action_left, action_right = responsive_columns([1, 1], compact_count=1)
+        compute_distribution = action_left.button("Compute NLI Distribution")
+        clear_distribution = action_right.button("Clear Distribution Result")
+
+        if clear_distribution:
+            st.session_state["nli_distribution_result"] = None
+            st.session_state["nli_distribution_meta"] = None
+
+        if compute_distribution:
+            reset_execution_console()
+            append_execution_log(
+                f"NLI distribution requested for target `{target_column}` across up to {int(distribution_limit)} firms."
             )
-            status_placeholder.caption(f"Current firm: `{label}`")
-            if processed == 1 or processed == denominator or processed - progress_state["last_logged_processed"] >= 25:
-                append_execution_log(f"Distribution progress {processed}/{denominator}. Current firm: {label}")
-                progress_state["last_logged_processed"] = processed
+            update_step_status("Compute NLI distribution", "running", f"Limit={int(distribution_limit)}")
+            progress_bar = st.progress(0, text="Preparing NLI distribution run...")
+            status_placeholder = st.empty()
+            progress_state = {"last_logged_processed": 0}
 
-        st.session_state["nli_distribution_result"] = compute_nli_distribution(
-            analysis_frame,
-            target_column,
-            max_entities=int(distribution_limit),
-            progress_callback=update_progress,
-            break_method=evaluation_mode,
-            strict_whitening=evaluation_mode == "strict",
-        )
-        st.session_state["nli_distribution_meta"] = distribution_meta
-        progress_bar.progress(1.0, text="NLI distribution complete.")
-        status_placeholder.caption("Distribution run finished.")
-        distribution_result = st.session_state["nli_distribution_result"]
-        update_step_status(
-            "Compute NLI distribution",
-            "completed",
-            f"Successful={distribution_result.successful_entities}, Failed={distribution_result.failed_entities}",
-        )
-        append_execution_log(
-            "NLI distribution completed. "
-            f"Processed={distribution_result.processed_entities}, "
-            f"Successful={distribution_result.successful_entities}, "
-            f"Failed={distribution_result.failed_entities}."
-        )
-        save_current_snapshot("distribution", f"NLI Distribution | {target_column} | top {int(distribution_limit)}")
+            def update_progress(processed: int, total: int, label: str) -> None:
+                denominator = max(total, 1)
+                progress_bar.progress(
+                    min(processed / denominator, 1.0),
+                    text=f"Processing {processed}/{denominator}: {label}",
+                )
+                status_placeholder.caption(f"Current firm: `{label}`")
+                if processed == 1 or processed == denominator or processed - progress_state["last_logged_processed"] >= 25:
+                    append_execution_log(f"Distribution progress {processed}/{denominator}. Current firm: {label}")
+                    progress_state["last_logged_processed"] = processed
+
+            st.session_state["nli_distribution_result"] = compute_nli_distribution(
+                analysis_frame,
+                target_column,
+                max_entities=int(distribution_limit),
+                progress_callback=update_progress,
+                break_method=evaluation_mode,
+                strict_whitening=evaluation_mode == "strict",
+            )
+            st.session_state["nli_distribution_meta"] = distribution_meta
+            progress_bar.progress(1.0, text="NLI distribution complete.")
+            status_placeholder.caption("Distribution run finished.")
+            distribution_result = st.session_state["nli_distribution_result"]
+            update_step_status(
+                "Compute NLI distribution",
+                "completed",
+                f"Successful={distribution_result.successful_entities}, Failed={distribution_result.failed_entities}",
+            )
+            append_execution_log(
+                "NLI distribution completed. "
+                f"Processed={distribution_result.processed_entities}, "
+                f"Successful={distribution_result.successful_entities}, "
+                f"Failed={distribution_result.failed_entities}."
+            )
+            save_current_snapshot("distribution", f"NLI Distribution | {target_column} | top {int(distribution_limit)}")
+    else:
+        st.caption("Upload a CSV file to compute a new NLI distribution. Saved distribution history remains viewable below.")
 
     distribution_result = st.session_state.get("nli_distribution_result")
     stored_meta = st.session_state.get("nli_distribution_meta")
@@ -1483,13 +1571,17 @@ elif view == "NLI Distribution":
                 st.dataframe(distribution_result.failure_examples, width="stretch")
 
 else:
-    entity_summary_csv = summarize_entities(analysis_frame, target_column).to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download entity summary",
-        entity_summary_csv,
-        file_name="entity_summary.csv",
-        mime="text/csv",
-    )
+    if dataset_uploaded:
+        entity_summary_export = summarize_entities(analysis_frame, target_column)
+    else:
+        entity_summary_export = analysis_result.get("entity_summary", pd.DataFrame())
+    if not entity_summary_export.empty:
+        st.download_button(
+            "Download entity summary",
+            entity_summary_export.to_csv(index=False).encode("utf-8"),
+            file_name="entity_summary.csv",
+            mime="text/csv",
+        )
     if analysis_scope == "Single entity diagnostics":
         st.download_button(
             "Download naive baseline forecasts",

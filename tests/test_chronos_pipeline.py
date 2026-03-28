@@ -52,9 +52,11 @@ def test_chronos_deterministic_mode_collapses_quantiles(monkeypatch):
 
     assert result.available
     assert (result.predictions["q025"] == result.predictions["q50"]).all()
+    assert (result.predictions["q05"] == result.predictions["q50"]).all()
     assert (result.predictions["q10"] == result.predictions["q50"]).all()
     assert (result.predictions["q25"] == result.predictions["q50"]).all()
     assert (result.predictions["q50"] == result.predictions["q90"]).all()
+    assert (result.predictions["q95"] == result.predictions["q50"]).all()
     assert (result.predictions["q75"] == result.predictions["q50"]).all()
     assert (result.predictions["q975"] == result.predictions["q50"]).all()
     assert (result.predictions["sample_count"] == 1).all()
@@ -83,15 +85,18 @@ def test_chronos_sampled_mode_emits_nested_intervals(monkeypatch):
     result = expanding_window_forecast(frame, holdout_size=2, deterministic=False, seed=99, num_samples=5)
 
     assert result.available
-    assert {"q025", "q10", "q25", "q50", "q75", "q90", "q975"}.issubset(result.predictions.columns)
-    assert (result.predictions["q025"] <= result.predictions["q10"]).all()
+    assert {"q025", "q05", "q10", "q25", "q50", "q75", "q90", "q95", "q975"}.issubset(result.predictions.columns)
+    assert (result.predictions["q025"] <= result.predictions["q05"]).all()
+    assert (result.predictions["q05"] <= result.predictions["q10"]).all()
     assert (result.predictions["q10"] <= result.predictions["q25"]).all()
     assert (result.predictions["q25"] <= result.predictions["q50"]).all()
     assert (result.predictions["q50"] <= result.predictions["q75"]).all()
     assert (result.predictions["q75"] <= result.predictions["q90"]).all()
-    assert (result.predictions["q90"] <= result.predictions["q975"]).all()
+    assert (result.predictions["q90"] <= result.predictions["q95"]).all()
+    assert (result.predictions["q95"] <= result.predictions["q975"]).all()
     assert (result.predictions["interval_width_50"] <= result.predictions["interval_width"]).all()
-    assert (result.predictions["interval_width"] <= result.predictions["interval_width_95"]).all()
+    assert (result.predictions["interval_width"] <= result.predictions["interval_width_90"]).all()
+    assert (result.predictions["interval_width_90"] <= result.predictions["interval_width_95"]).all()
     assert not bool(result.metrics["intervals_collapsed"].iloc[0])
 
 
@@ -122,5 +127,7 @@ def test_chronos_handles_positional_predict_and_direct_quantiles(monkeypatch):
 
     assert result.available
     assert (result.predictions["quantile_source"] == "direct_quantiles").all()
+    assert (result.predictions["q05"] <= result.predictions["q10"]).all()
     assert (result.predictions["q10"] <= result.predictions["q50"]).all()
     assert (result.predictions["q50"] <= result.predictions["q90"]).all()
+    assert (result.predictions["q90"] <= result.predictions["q95"]).all()

@@ -9,8 +9,43 @@ from plotly.subplots import make_subplots
 INTERVAL_COLUMN_MAP = {
     "50%": ("q25", "q75"),
     "80%": ("q10", "q90"),
+    "90%": ("q05", "q95"),
     "95%": ("q025", "q975"),
 }
+
+INTERVAL_FILL_MAP = {
+    "50%": "rgba(31, 119, 180, 0.32)",
+    "80%": "rgba(31, 119, 180, 0.22)",
+    "90%": "rgba(31, 119, 180, 0.16)",
+    "95%": "rgba(31, 119, 180, 0.10)",
+}
+
+
+def _add_interval_band(figure: go.Figure, forecast_frame: pd.DataFrame, interval_label: str) -> None:
+    lower_column, upper_column = INTERVAL_COLUMN_MAP[interval_label]
+    if forecast_frame.empty or not {lower_column, upper_column}.issubset(forecast_frame.columns):
+        return
+    figure.add_trace(
+        go.Scatter(
+            x=forecast_frame["date"],
+            y=forecast_frame[upper_column],
+            mode="lines",
+            line={"width": 0},
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=forecast_frame["date"],
+            y=forecast_frame[lower_column],
+            mode="lines",
+            fill="tonexty",
+            fillcolor=INTERVAL_FILL_MAP[interval_label],
+            name=f"{interval_label} interval",
+            line={"width": 0},
+        )
+    )
 
 
 def build_forecast_figure(
@@ -19,12 +54,16 @@ def build_forecast_figure(
     title: str,
 ) -> go.Figure:
     figure = go.Figure()
+    if not forecast_frame.empty:
+        for interval_label in ("95%", "90%", "80%", "50%"):
+            _add_interval_band(figure, forecast_frame, interval_label)
     figure.add_trace(
         go.Scatter(
             x=actual_series["date"],
             y=actual_series["value"],
             mode="lines+markers",
             name="Actual",
+            line={"width": 3, "color": "#1f1f1f"},
         )
     )
     if not forecast_frame.empty:
@@ -34,28 +73,9 @@ def build_forecast_figure(
                 y=forecast_frame["forecast"],
                 mode="lines+markers",
                 name=forecast_frame["model"].iloc[0],
+                line={"width": 3},
             )
         )
-        if {"q10", "q90"}.issubset(forecast_frame.columns):
-            figure.add_trace(
-                go.Scatter(
-                    x=forecast_frame["date"],
-                    y=forecast_frame["q90"],
-                    mode="lines",
-                    line={"width": 0},
-                    showlegend=False,
-                )
-            )
-            figure.add_trace(
-                go.Scatter(
-                    x=forecast_frame["date"],
-                    y=forecast_frame["q10"],
-                    mode="lines",
-                    fill="tonexty",
-                    name="80% interval",
-                    line={"width": 0},
-                )
-            )
 
     figure.update_layout(title=title, xaxis_title="Date", yaxis_title="Value")
     return figure
@@ -69,13 +89,16 @@ def build_interval_forecast_figure(
 ) -> go.Figure:
     lower_column, upper_column = INTERVAL_COLUMN_MAP[interval_label]
     figure = go.Figure()
+    if not forecast_frame.empty:
+        model_name = str(forecast_frame["model"].iloc[0])
+        _add_interval_band(figure, forecast_frame, interval_label)
     figure.add_trace(
         go.Scatter(
             x=actual_series["date"],
             y=actual_series["value"],
             mode="lines+markers",
             name="Actual",
-            line={"width": 3},
+            line={"width": 3, "color": "#1f1f1f"},
         )
     )
     if not forecast_frame.empty:
@@ -83,29 +106,10 @@ def build_interval_forecast_figure(
         figure.add_trace(
             go.Scatter(
                 x=forecast_frame["date"],
-                y=forecast_frame[upper_column],
-                mode="lines",
-                line={"width": 0},
-                showlegend=False,
-                hoverinfo="skip",
-            )
-        )
-        figure.add_trace(
-            go.Scatter(
-                x=forecast_frame["date"],
-                y=forecast_frame[lower_column],
-                mode="lines",
-                fill="tonexty",
-                name=f"{interval_label} interval",
-                line={"width": 0},
-            )
-        )
-        figure.add_trace(
-            go.Scatter(
-                x=forecast_frame["date"],
                 y=forecast_frame["forecast"],
                 mode="lines+markers",
                 name=f"{model_name} median forecast",
+                line={"width": 3},
             )
         )
 
