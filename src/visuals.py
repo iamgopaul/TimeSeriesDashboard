@@ -13,11 +13,28 @@ INTERVAL_COLUMN_MAP = {
     "95%": ("q025", "q975"),
 }
 
-INTERVAL_FILL_MAP = {
-    "50%": "rgba(31, 119, 180, 0.32)",
-    "80%": "rgba(31, 119, 180, 0.22)",
-    "90%": "rgba(31, 119, 180, 0.16)",
-    "95%": "rgba(31, 119, 180, 0.10)",
+INTERVAL_STYLE_MAP = {
+    "50%": {
+        "fillcolor": "rgba(31, 119, 180, 0.34)",
+        "linecolor": "rgba(31, 119, 180, 0.95)",
+    },
+    "80%": {
+        "fillcolor": "rgba(255, 127, 14, 0.24)",
+        "linecolor": "rgba(255, 127, 14, 0.95)",
+    },
+    "90%": {
+        "fillcolor": "rgba(148, 103, 189, 0.18)",
+        "linecolor": "rgba(148, 103, 189, 0.95)",
+    },
+    "95%": {
+        "fillcolor": "rgba(214, 39, 40, 0.12)",
+        "linecolor": "rgba(214, 39, 40, 0.95)",
+    },
+}
+
+ACTUAL_TRACE_STYLE = {
+    "line": {"width": 4, "color": "#2ca02c"},
+    "marker": {"size": 8, "color": "#2ca02c"},
 }
 
 
@@ -25,12 +42,13 @@ def _add_interval_band(figure: go.Figure, forecast_frame: pd.DataFrame, interval
     lower_column, upper_column = INTERVAL_COLUMN_MAP[interval_label]
     if forecast_frame.empty or not {lower_column, upper_column}.issubset(forecast_frame.columns):
         return
+    style = INTERVAL_STYLE_MAP[interval_label]
     figure.add_trace(
         go.Scatter(
             x=forecast_frame["date"],
             y=forecast_frame[upper_column],
             mode="lines",
-            line={"width": 0},
+            line={"width": 1.2, "color": style["linecolor"]},
             showlegend=False,
             hoverinfo="skip",
         )
@@ -41,9 +59,9 @@ def _add_interval_band(figure: go.Figure, forecast_frame: pd.DataFrame, interval
             y=forecast_frame[lower_column],
             mode="lines",
             fill="tonexty",
-            fillcolor=INTERVAL_FILL_MAP[interval_label],
+            fillcolor=style["fillcolor"],
             name=f"{interval_label} interval",
-            line={"width": 0},
+            line={"width": 1.2, "color": style["linecolor"]},
         )
     )
 
@@ -63,7 +81,8 @@ def build_forecast_figure(
             y=actual_series["value"],
             mode="lines+markers",
             name="Actual",
-            line={"width": 3, "color": "#1f1f1f"},
+            line=ACTUAL_TRACE_STYLE["line"],
+            marker=ACTUAL_TRACE_STYLE["marker"],
         )
     )
     if not forecast_frame.empty:
@@ -98,7 +117,8 @@ def build_interval_forecast_figure(
             y=actual_series["value"],
             mode="lines+markers",
             name="Actual",
-            line={"width": 3, "color": "#1f1f1f"},
+            line=ACTUAL_TRACE_STYLE["line"],
+            marker=ACTUAL_TRACE_STYLE["marker"],
         )
     )
     if not forecast_frame.empty:
@@ -129,7 +149,8 @@ def build_combined_forecast_figure(
             y=actual_series["value"],
             mode="lines+markers",
             name="Actual",
-            line={"width": 3},
+            line=ACTUAL_TRACE_STYLE["line"],
+            marker=ACTUAL_TRACE_STYLE["marker"],
         )
     )
     for forecast_frame in forecast_frames:
@@ -185,7 +206,8 @@ def build_panel_aggregate_forecast_figure(forecast_panel: pd.DataFrame, title: s
             y=actual_series["actual"],
             mode="lines+markers",
             name="Panel actual mean",
-            line={"width": 3},
+            line=ACTUAL_TRACE_STYLE["line"],
+            marker=ACTUAL_TRACE_STYLE["marker"],
         )
     )
     forecast_summary = (

@@ -1063,6 +1063,19 @@ if view == "Forecasts":
             if {"q025", "q975"}.issubset(chronos_forecast.predictions.columns):
                 collapse_checks.append((chronos_forecast.predictions["q025"] == chronos_forecast.predictions["q975"]).all())
             intervals_collapsed = bool(collapse_checks and all(collapse_checks))
+        if not interval_labels:
+            st.info(
+                "This Chronos run does not include the interval columns needed for visible uncertainty bands on the charts."
+            )
+        elif intervals_collapsed:
+            st.info(
+                "Chronos is running in deterministic mode, so the 50%, 80%, 90%, and 95% intervals collapse to the point forecast. "
+                "The charts still include the interval traces, but they will sit directly on top of the median prediction."
+            )
+        else:
+            st.caption(
+                "Chronos Actual vs Prediction includes nested interval shading: blue `50%`, orange `80%`, purple `90%`, and red `95%`."
+            )
         st.plotly_chart(
             build_forecast_figure(
                 result_entity_series,
@@ -1075,11 +1088,6 @@ if view == "Forecasts":
             st.info("This saved Chronos result does not contain the interval columns needed for the dedicated uncertainty charts.")
         else:
             st.subheader("Chronos Prediction Intervals")
-            if intervals_collapsed:
-                st.info(
-                    "Chronos is running in deterministic mode, so the 50%, 80%, 90%, and 95% intervals collapse to the point forecast. "
-                    "The charts are still shown below, but the bands will sit directly on top of the median prediction."
-                )
             first_row_labels = interval_labels[:2]
             second_row_labels = interval_labels[2:]
             if first_row_labels:
