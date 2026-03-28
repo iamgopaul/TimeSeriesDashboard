@@ -1084,7 +1084,7 @@ if view == "Forecasts":
             )
         else:
             st.caption(
-                "Chronos Actual vs Prediction includes nested interval shading: blue `50%`, orange `80%`, purple `90%`, and red `95%`."
+                "Chronos Actual vs Prediction now shows a clean point forecast only. The highlighted uncertainty regions are shown in the dedicated interval charts below: blue `50%`, orange `80%`, purple `90%`, and red `95%`."
             )
         st.plotly_chart(
             build_forecast_figure(
@@ -1098,6 +1098,9 @@ if view == "Forecasts":
             st.info("This saved Chronos result does not contain the interval columns needed for the dedicated uncertainty charts.")
         else:
             st.subheader("Chronos Prediction Intervals")
+            st.caption(
+                "Each interval is split into its own chart so the highlighted uncertainty region is easier to read."
+            )
             first_row_labels = interval_labels[:2]
             second_row_labels = interval_labels[2:]
             if first_row_labels:
@@ -1443,7 +1446,7 @@ elif view == "Tournament Summary":
                 selected_interval_labels = available_interval_labels(selected_chronos)
                 if selected_interval_labels:
                     st.caption(
-                        "Saved tournament drilldowns also include the Chronos interval bands captured during the multi-firm run."
+                        "Saved tournament drilldowns also include separate highlighted Chronos interval charts for readability."
                     )
                     first_row_labels = selected_interval_labels[:2]
                     second_row_labels = selected_interval_labels[2:]
