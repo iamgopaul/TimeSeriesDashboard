@@ -72,6 +72,8 @@ except Exception:
 
 _EXECUTION_STEP_PLACEHOLDER = None
 _EXECUTION_LOG_PLACEHOLDER = None
+FULL_CLEANED_DATASET_SCOPE = "Full Cleaned Dataset"
+LEGACY_FULL_CLEANED_DATASET_SCOPE = "Full cleaned dataset summary"
 FULL_DATASET_FORECAST_VIEW = "Full Cleaned Forecast Analysis"
 LEGACY_TOURNAMENT_VIEW = "Tournament Summary"
 
@@ -148,6 +150,12 @@ def normalize_dashboard_view(view_name: str | None) -> str:
     if view_name == LEGACY_TOURNAMENT_VIEW:
         return FULL_DATASET_FORECAST_VIEW
     return str(view_name or "Forecasts")
+
+
+def normalize_analysis_scope(scope_name: str | None) -> str:
+    if scope_name == LEGACY_FULL_CLEANED_DATASET_SCOPE:
+        return FULL_CLEANED_DATASET_SCOPE
+    return str(scope_name or "Single entity diagnostics")
 
 
 def reset_execution_console() -> None:
@@ -452,7 +460,7 @@ if dataset_uploaded:
     with overview_left:
         analysis_scope = st.selectbox(
             "Analysis scope",
-            ["Single entity diagnostics", "Full cleaned dataset summary"],
+            ["Single entity diagnostics", FULL_CLEANED_DATASET_SCOPE],
         )
         target_column = st.selectbox(
             "Target metric",
@@ -615,7 +623,9 @@ if dataset_uploaded:
 else:
     analysis_result = st.session_state["analysis_result"]
     analysis_meta = st.session_state.get("analysis_meta") or {}
-    analysis_scope = str(analysis_result.get("analysis_scope", analysis_meta.get("analysis_scope", "Single entity diagnostics")))
+    analysis_scope = normalize_analysis_scope(
+        analysis_result.get("analysis_scope", analysis_meta.get("analysis_scope", "Single entity diagnostics"))
+    )
     target_column = str(analysis_meta.get("target_column", "Saved target"))
     entity_label = str(analysis_meta.get("entity_label", "Saved entity"))
     entity_id = str(analysis_meta.get("entity_id", entity_label))
@@ -845,7 +855,7 @@ if not has_matching_analysis:
     st.stop()
 
 analysis_result = st.session_state["analysis_result"]
-analysis_scope = analysis_result["analysis_scope"]
+analysis_scope = normalize_analysis_scope(analysis_result["analysis_scope"])
 active_analysis_meta = st.session_state.get("analysis_meta") or analysis_meta
 active_holdout_size = int(active_analysis_meta.get("holdout_size", holdout_size))
 active_evaluation_mode = str(active_analysis_meta.get("evaluation_mode", evaluation_mode))
@@ -1579,7 +1589,11 @@ elif view == "NLI Distribution":
         "ARIMA, and residual-testing pipeline. Start with a smaller sample."
     )
     if dataset_uploaded:
-        default_limit = int(analysis_frame["entity_id"].nunique()) if analysis_scope == "Full cleaned dataset summary" else min(50, int(analysis_frame["entity_id"].nunique()))
+        default_limit = (
+            int(analysis_frame["entity_id"].nunique())
+            if analysis_scope == FULL_CLEANED_DATASET_SCOPE
+            else min(50, int(analysis_frame["entity_id"].nunique()))
+        )
         distribution_limit = st.number_input(
             "Max entities for NLI distribution",
             min_value=25,
